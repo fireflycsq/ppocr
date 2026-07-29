@@ -15,7 +15,7 @@ export interface PdfPageImage {
 }
 
 /** 渲染分辨率上限（长边像素）。略降可明显加快 VL 推理，减少 502 */
-const MAX_DIMENSION = 1280
+const MAX_DIMENSION = 1600
 
 export interface RenderPdfOptions {
   maxDimension?: number

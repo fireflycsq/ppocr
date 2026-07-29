@@ -113,7 +113,7 @@ export async function extractPdfFileWithLlm(
     if (params.signal?.aborted) throw new DOMException('已中断', 'AbortError')
     images.push(
       await page.render({
-        maxDimension: 1280,
+        maxDimension: 1600,
         jpegQuality: 0.75,
       }),
     )
