@@ -1,0 +1,104 @@
+services:
+  # 暂时停用 PPocr 容器：计划改为部署多模态 OCR 识别模型，
+  # 且当前后台启动时动态图强转静态图会导致识别失败。
+  # 恢复时取消注释，并把 frontend 的 depends_on 里的 ocr 依赖加回来。
+  # ocr:
+  #   image: ${OCR_IMAGE:-myppocr:1.0}
+  #   container_name: ${OCR_CONTAINER_NAME:-myppocr}
+  #   restart: unless-stopped
+  #   working_dir: ${OCR_CONTAINER_WORKDIR:-/workspace}
+  #   volumes:
+  #     # 代码目录只读；模型、数据均挂到 /workspace 外，避免子路径覆盖 + 只读冲突
+  #     - ${OCR_SERVER_DIR:-./server}:${OCR_CONTAINER_WORKDIR:-/workspace}:ro
+  #     - ${OCR_MODELS_DIR:-./paddleocr_models}:/models
+  #     - ${OCR_TEMP_DIR:-./data/temp_uploads}:/data/temp_uploads
+  #     - ${OCR_OUTPUT_DIR:-./data/output}:/data/output
+  #   environment:
+  #     OCR_TEMP_DIR: /data/temp_uploads
+  #     OCR_OUTPUT_DIR: /data/output
+  #     OCR_MODELS_DIR: /models
+  #     OCR_PYTHON: ${OCR_PYTHON:-python3}
+  #     OCR_PORT: ${OCR_PORT:-8000}
+  #   command:
+  #     [
+  #       'sh',
+  #       '-c',
+  #       'mkdir -p /data/temp_uploads /data/output && exec $$OCR_PYTHON -m uvicorn main:app --host 0.0.0.0 --port $$OCR_PORT',
+  #     ]
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         memory: 8G
+  #   healthcheck:
+  #     test:
+  #       [
+  #         'CMD-SHELL',
+  #         '${OCR_PYTHON:-python3} -c "import urllib.request; urllib.request.urlopen(''http://127.0.0.1:${OCR_PORT:-8000}/health'')"',
+  #       ]
+  #     interval: 30s
+  #     timeout: 15s
+  #     start_period: 120s
+  #     retries: 10
+  #   networks:
+  #     - ppocr-net
+
+  label-api:
+    build:
+      context: ${OCR_SERVER_DIR:-./server}
+      dockerfile: Dockerfile.label
+    image: ${LABEL_API_IMAGE:-ppocr-label-api:1.0}
+    container_name: ${LABEL_API_CONTAINER_NAME:-ppocr-label-api}
+    restart: unless-stopped
+    working_dir: /workspace
+    volumes:
+      - ${OCR_SERVER_DIR:-./server}:/workspace:ro
+      - ${LABEL_DATA_DIR:-./data/label_data}:/data/label_data
+    environment:
+      LABEL_DATA_DIR: /data/label_data
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      LABEL_DEFAULT_USER: ${LABEL_DEFAULT_USER:-admin}
+      LABEL_DEFAULT_PASSWORD: ${LABEL_DEFAULT_PASSWORD:-admin123}
+      LABEL_ALLOW_REGISTER: ${LABEL_ALLOW_REGISTER:-true}
+      LABEL_EXAMPLE_MAX_MB: ${LABEL_EXAMPLE_MAX_MB:-25}
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'python -c "import urllib.request; urllib.request.urlopen(''http://127.0.0.1:8001/health'')"',
+        ]
+      interval: 15s
+      timeout: 10s
+      start_period: 45s
+      retries: 5
+    networks:
+      - ppocr-net
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ppocr-web
+    restart: unless-stopped
+    ports:
+      - '${FRONTEND_PORT:-8080}:80'
+    environment:
+      OCR_UPSTREAM: ${OCR_CONTAINER_NAME:-myppocr}:${OCR_PORT:-8000}
+      LABEL_UPSTREAM: ${LABEL_API_CONTAINER_NAME:-ppocr-label-api}:8001
+      # Ollama（Qwen3-VL）地址。默认走宿主机 11434 端口（要求宿主机 Ollama 监听 0.0.0.0）。
+      # 若 Ollama 以容器方式部署，请在 .env 设置 LLM_UPSTREAM=<ollama容器名>:11434，
+      # 并执行 docker network connect ppocr_ppocr-net <ollama容器名> 使其可达
+      LLM_UPSTREAM: ${LLM_UPSTREAM:-host.docker.internal:11434}
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    depends_on:
+      # ocr 容器暂时停用，恢复时加回：
+      # ocr:
+      #   condition: service_started
+      label-api:
+        condition: service_started
+    networks:
+      - ppocr-net
+
+networks:
+  ppocr-net:
+    driver: bridge
