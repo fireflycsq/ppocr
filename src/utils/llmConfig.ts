@@ -74,6 +74,7 @@ export function buildDefaultUserPrompt(template: LabelLayoutTemplate): string {
     '- 金额只保留数字、小数点与负号；日期、编号保持原文',
     '- 表格明细逐行抽取，不要合并、不要遗漏行',
     '- 只输出 JSON 本身',
+    '- 图片中未出现的字段在 JSON 中省略或填空字符串，不要编造',
   )
 
   if (template.id === 'air_waybill') {

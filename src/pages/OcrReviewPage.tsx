@@ -1,11 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { checkLlmHealth } from '../api/llm'
-import {
-  deleteLlmExample,
-  listLlmExamples,
-  uploadLlmExample,
-} from '../api/examples'
-import { LlmExamplePanel } from '../components/LlmExamplePanel'
 import { LlmConfigPanel } from '../components/LlmConfigPanel'
 import { PdfPreview } from '../components/PdfPreview'
 import { UploadPanel } from '../components/UploadPanel'
@@ -13,7 +7,6 @@ import { HeaderFieldsForm } from '../components/labeling/HeaderFieldsForm'
 import { InvoiceEntriesEditor } from '../components/labeling/InvoiceEntriesEditor'
 import { InvoiceWithSublistEntriesEditor } from '../components/labeling/InvoiceWithSublistEntriesEditor'
 import { SublistTableEditor } from '../components/labeling/SublistTableEditor'
-import { useAuth } from '../contexts/AuthContext'
 import { usePersistedPanelWidth } from '../hooks/usePersistedPanelWidth'
 import type {
   InvoiceEntry,
@@ -21,7 +14,6 @@ import type {
   TargetStructureType,
 } from '../types/labeling'
 import { STRUCTURE_OPTIONS } from '../types/labeling'
-import type { LlmExample, PromptOptimization } from '../types/llmExamples'
 import { downloadJson } from '../utils'
 import {
   buildDocumentExportPayload,
@@ -54,24 +46,8 @@ import {
   extractionToReviewData,
   extractPdfFileWithLlm,
 } from '../utils/llmExtraction'
-import {
-  applyPromptOptimization,
-  buildClassificationAgentConfig,
-  clearPromptOptimization,
-  examplesRevision,
-  loadPromptOptimization,
-  optimizePromptFromExamples,
-  savePromptOptimization,
-} from '../utils/promptOptimizer'
 
-type Phase = 'idle' | 'optimize' | 'classify' | 'extract'
-
-const configuredClassificationThreshold = Number(
-  import.meta.env.VITE_LLM_CLASSIFICATION_THRESHOLD ?? '0.8',
-)
-const CLASSIFICATION_THRESHOLD = Number.isFinite(configuredClassificationThreshold)
-  ? Math.min(1, Math.max(0, configuredClassificationThreshold))
-  : 0.8
+type Phase = 'idle' | 'extract'
 
 const WORKFLOW_STEPS = [
   { key: 'upload', label: '上传 PDF' },
@@ -87,7 +63,6 @@ function pageNumbers(outcomes: PageOutcome[], status: PageOutcome['status']): nu
 }
 
 export default function OcrReviewPage() {
-  const { user } = useAuth()
   const [step, setStep] = useState<'upload' | 'review'>('upload')
   const [file, setFile] = useState<File | null>(null)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
@@ -105,12 +80,6 @@ export default function OcrReviewPage() {
 
   const [llmReady, setLlmReady] = useState(false)
   const [llmModels, setLlmModels] = useState<string[]>([])
-  const [examples, setExamples] = useState<LlmExample[]>([])
-  const [examplesLoading, setExamplesLoading] = useState(false)
-  const [examplesError, setExamplesError] = useState<string | null>(null)
-  const [optimization, setOptimization] = useState<PromptOptimization | null>(() =>
-    loadPromptOptimization(DEFAULT_TEMPLATE_ID),
-  )
 
   const [phase, setPhase] = useState<Phase>('idle')
   const [progress, setProgress] = useState({ done: 0, total: 0 })
@@ -160,33 +129,7 @@ export default function OcrReviewPage() {
   // 切换版式时载入该版式的提示词配置
   useEffect(() => {
     setLlmConfig(loadLlmConfig(template))
-    setOptimization(loadPromptOptimization(template.id))
-    if (!user) {
-      setExamples([])
-      setExamplesLoading(false)
-      setExamplesError('请先在「单证标注」页面登录，再使用服务器共享样例')
-      return
-    }
-    setExamplesLoading(true)
-    setExamplesError(null)
-    let cancelled = false
-    void listLlmExamples(template.id)
-      .then((items) => {
-        if (!cancelled) setExamples(items)
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          setExamples([])
-          setExamplesError(err instanceof Error ? err.message : '加载共享样例失败')
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setExamplesLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [template, user])
+  }, [template])
 
   useEffect(() => {
     return () => {
@@ -204,68 +147,7 @@ export default function OcrReviewPage() {
 
   const handleConfigReset = () => {
     clearLlmConfig(templateId)
-    clearPromptOptimization(templateId)
-    setOptimization(null)
     setLlmConfig(buildDefaultLlmConfig(template))
-  }
-
-  const handleExampleUpload = async (
-    sample: File,
-    answer: Record<string, unknown>,
-    category: 'target' | 'non_target',
-  ) => {
-    const created = await uploadLlmExample({
-      layoutTemplateId: templateId,
-      category,
-      sample,
-      answer,
-    })
-    setExamples((current) => [created, ...current])
-  }
-
-  const handleExampleDelete = async (id: number) => {
-    await deleteLlmExample(id)
-    setExamples((current) => current.filter((item) => item.id !== id))
-  }
-
-  const optimizeCurrentPrompt = async (
-    signal?: AbortSignal,
-  ): Promise<{ requestJson: string; optimization: PromptOptimization }> => {
-    setLlmStream({ label: '正在根据样例学习目标/非目标判定特征…', text: '' })
-    const nextOptimization = await optimizePromptFromExamples({
-      examples,
-      template,
-      requestJson: llmConfig.requestJson,
-      signal,
-      onStreamUpdate: (event) => {
-        setLlmStream({ label: event.label, text: event.text })
-      },
-    })
-    const requestJson = applyPromptOptimization(
-      llmConfig.requestJson,
-      nextOptimization,
-    )
-    savePromptOptimization(templateId, nextOptimization)
-    saveLlmConfig(templateId, { requestJson })
-    setOptimization(nextOptimization)
-    setLlmConfig({ requestJson })
-    return { requestJson, optimization: nextOptimization }
-  }
-
-  const handleOptimize = async () => {
-    if (phase !== 'idle') return
-    const controller = new AbortController()
-    abortRef.current = controller
-    setError(null)
-    setPhase('optimize')
-    try {
-      await optimizeCurrentPrompt(controller.signal)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '样例提示词优化失败')
-    } finally {
-      setPhase('idle')
-      abortRef.current = null
-    }
   }
 
   const handleFileSelect = (selected: File) => {
@@ -309,57 +191,27 @@ export default function OcrReviewPage() {
     setPageOutcomes([])
     setExtraction(null)
     setLlmStream({ label: '准备连接大模型…', text: '' })
-    setPhase('classify')
+    setPhase('extract')
     setProgress({ done: 0, total: 0 })
 
     const controller = new AbortController()
     abortRef.current = controller
 
     try {
-      let requestJson = llmConfig.requestJson
-      let classificationAgent = buildClassificationAgentConfig(optimization, llmModel)
-      const revision = examplesRevision(examples)
-      if (
-        examples.length > 0 &&
-        optimization?.examplesRevision !== revision
-      ) {
-        setPhase('optimize')
-        const optimized = await optimizeCurrentPrompt(controller.signal)
-        requestJson = optimized.requestJson
-        classificationAgent = buildClassificationAgentConfig(
-          optimized.optimization,
-          llmModel,
-        )
-      }
-
-      setPhase('classify')
       const result = await extractPdfFileWithLlm({
         file,
-        requestJson,
+        requestJson: llmConfig.requestJson,
         template,
-        classificationAgent,
-        classificationThreshold: CLASSIFICATION_THRESHOLD,
         signal: controller.signal,
-        onClassifyDone: (outcome, done, total) => {
-          if (outcome) {
-            setPageOutcomes((prev) => [...prev, outcome])
-          }
-          setProgress({ done, total })
-        },
-        onExtractionStart: (total) => {
-          setPhase('extract')
-          setProgress({ done: 0, total })
-        },
         onPageDone: (outcome, done, total) => {
           setPageOutcomes((prev) => [...prev, outcome])
           setProgress({ done, total })
         },
         onStreamUpdate: (event) => {
-          const label =
-            event.phase === 'classify'
-              ? `低清预判 · PDF 第 ${event.pageIndex + 1}/${event.totalPages} 页`
-              : `高清抽取 · PDF 第 ${event.pageIndex + 1} 页（共 ${event.totalPages} 页待抽取）`
-          setLlmStream({ label, text: event.text })
+          setLlmStream({
+            label: `逐页抽取 · PDF 第 ${event.pageIndex + 1}/${event.totalPages} 页`,
+            text: event.text,
+          })
         },
       })
 
@@ -373,14 +225,7 @@ export default function OcrReviewPage() {
               '请检查「大模型请求配置」中的 model 是否与 ollama list 一致',
           )
         } else {
-          const prefiltered = result.pageOutcomes.filter(
-            (outcome) => outcome.status === 'prefiltered',
-          )
-          setError(
-            prefiltered.length === result.pageOutcomes.length
-              ? '低分辨率预判认为所有页面都不是目标单证，已停止高清抽取。请检查逐页判定理由、样例或版式。'
-              : '模型将所有页都判定为不含目标字段，请检查样例、提示词或版式。',
-          )
+          setError('模型将所有页都判定为不含目标字段，请检查提示词或版式。')
         }
         return
       }
@@ -626,10 +471,6 @@ export default function OcrReviewPage() {
         totalPages: extraction?.pageOutcomes.length ?? 0,
         targetPages: pageNumbers(extraction?.pageOutcomes ?? [], 'target'),
         skippedPages: pageNumbers(extraction?.pageOutcomes ?? [], 'skipped'),
-        prefilteredPages: pageNumbers(
-          extraction?.pageOutcomes ?? [],
-          'prefiltered',
-        ),
         errorPages: (extraction?.pageOutcomes ?? [])
           .filter((o) => o.status === 'error')
           .map((o) => ({ page: o.pageIndex + 1, error: o.error })),
@@ -674,16 +515,9 @@ export default function OcrReviewPage() {
     step === 'upload' ? (isRecognizing ? 1 : file ? 1 : 0) : 2
 
   const skippedPages = pageNumbers(extraction?.pageOutcomes ?? [], 'skipped')
-  const prefilteredPages = pageNumbers(
-    extraction?.pageOutcomes ?? [],
-    'prefiltered',
-  )
   const errorOutcomes = (extraction?.pageOutcomes ?? []).filter(
     (o) => o.status === 'error',
   )
-  const optimizationStale =
-    examples.length > 0 &&
-    optimization?.examplesRevision !== examplesRevision(examples)
 
   // 请求的模型不在 Ollama 已安装列表时给出明确警告（不带 tag 时 Ollama 默认取 :latest）
   const modelMissing =
@@ -699,7 +533,7 @@ export default function OcrReviewPage() {
         <div className="brand">
           <h1>智能预识别审核</h1>
           <p>
-            上传 PDF → Qwen3-VL 逐页抽取（自动过滤无关页）→ 按版式审核修正 → 导出 JSON
+            上传 PDF → Qwen3-VL 逐页抽取（每页 1 次请求）→ 按版式审核修正 → 导出 JSON
             <span className="engine-tag">
               引擎: ollama/{llmModel || '未设置'}
               {llmReady ? '' : '（未连接）'}
@@ -807,29 +641,11 @@ export default function OcrReviewPage() {
               onReset={handleConfigReset}
             />
 
-            <LlmExamplePanel
-              key={`examples-${templateId}`}
-              examples={examples}
-              disabled={!user || isRecognizing}
-              loading={examplesLoading}
-              optimizing={phase === 'optimize'}
-              optimizationStale={optimizationStale}
-              error={examplesError}
-              llmStream={phase === 'optimize' ? llmStream : null}
-              onUpload={handleExampleUpload}
-              onDelete={handleExampleDelete}
-              onOptimize={handleOptimize}
-            />
-
             {isRecognizing && (
               <section className="llm-progress-card">
                 <div className="llm-progress-header">
                   <strong>
-                    {phase === 'optimize'
-                      ? '正在根据样例优化目标单证判定…'
-                      : phase === 'classify'
-                        ? `正在低分辨率预判… ${progress.done}/${progress.total || '?'}`
-                        : `正在高清抽取… ${progress.done}/${progress.total || '?'}`}
+                    {`正在逐页抽取… ${progress.done}/${progress.total || '?'}`}
                   </strong>
                   <button
                     type="button"
@@ -848,11 +664,7 @@ export default function OcrReviewPage() {
                           ? '已抽取'
                           : outcome.status === 'skipped'
                             ? '无目标字段，已跳过'
-                            : outcome.status === 'prefiltered'
-                              ? `预判为非目标，已跳过（${Math.round(
-                                  (outcome.classification?.confidence ?? 0) * 100,
-                                )}%）`
-                              : `失败（${outcome.error ?? '未知错误'}）`}
+                            : `失败（${outcome.error ?? '未知错误'}）`}
                       </li>
                     ))}
                   </ul>
@@ -916,9 +728,6 @@ export default function OcrReviewPage() {
                     {skippedPages.length > 0 && (
                       <span>已跳过：第 {skippedPages.join('、')} 页</span>
                     )}
-                    {prefilteredPages.length > 0 && (
-                      <span>预判跳过：第 {prefilteredPages.join('、')} 页</span>
-                    )}
                     {errorOutcomes.length > 0 && (
                       <span className="llm-extract-errors">
                         失败：第{' '}
@@ -940,18 +749,8 @@ export default function OcrReviewPage() {
                               ? '已抽取'
                               : outcome.status === 'skipped'
                                 ? '判定为无目标字段'
-                                : outcome.status === 'prefiltered'
-                                  ? `低分辨率预判为非目标（置信度 ${Math.round(
-                                      (outcome.classification?.confidence ?? 0) *
-                                        100,
-                                    )}%）`
-                                  : `失败（${outcome.error ?? '未知错误'}）`}
+                                : `失败（${outcome.error ?? '未知错误'}）`}
                           </div>
-                          {outcome.classification && (
-                            <p className="llm-page-classification-reason">
-                              {outcome.classification.reason}
-                            </p>
-                          )}
                           {outcome.raw && (
                             <pre className="llm-page-detail-raw">{outcome.raw}</pre>
                           )}

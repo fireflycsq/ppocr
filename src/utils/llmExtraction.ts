@@ -1,8 +1,6 @@
 import { extractPageWithLlm, formatLlmStreamText, LlmOutputError, type LlmStreamSnapshot } from '../api/llm'
 import type { InvoiceEntry, SublistRow, TargetStructureType } from '../types/labeling'
-import type { ClassificationAgentConfig } from '../types/llmExamples'
 import type { LabelLayoutTemplate } from './labelTemplates'
-import { classifyPageWithLlm, shouldSkipPage } from './llmClassification'
 import { buildPageRequestBody } from './llmConfig'
 import type { PdfPageImage } from './pdfPageImages'
 import { processPdfPages } from './pdfPageImages'
@@ -13,7 +11,7 @@ import {
   createSublistRowId,
 } from './labelingStorage'
 
-export type PageStatus = 'target' | 'skipped' | 'prefiltered' | 'error'
+export type PageStatus = 'target' | 'skipped' | 'error'
 
 export interface PageOutcome {
   pageIndex: number
@@ -21,11 +19,6 @@ export interface PageOutcome {
   error?: string
   /** 模型对该页的原始输出，用于排查提示词/字段问题 */
   raw?: string
-  /** 低分辨率预判信息 */
-  classification?: {
-    confidence: number
-    reason: string
-  }
 }
 
 /** 按字段 key 聚合后的一张发票 */
@@ -46,16 +39,14 @@ function coerceValue(value: unknown): string {
   return ''
 }
 
-/** 只保留版式定义过的字段 key，并把值统一为字符串 */
+/** 只保留版式定义过的字段 key；无值或空值统一为 '' */
 function coerceRecord(
   raw: Record<string, unknown>,
   allowedKeys: Set<string>,
 ): Record<string, string> {
   const result: Record<string, string> = {}
-  for (const [key, value] of Object.entries(raw)) {
-    if (!allowedKeys.has(key)) continue
-    const coerced = coerceValue(value)
-    if (coerced) result[key] = coerced
+  for (const key of allowedKeys) {
+    result[key] = coerceValue(raw[key])
   }
   return result
 }
@@ -72,7 +63,6 @@ function findInvoiceNoKey(template: LabelLayoutTemplate): string | null {
 }
 
 export interface LlmStreamEvent {
-  phase: 'classify' | 'extract'
   pageIndex: number
   totalPages: number
   snapshot: LlmStreamSnapshot
@@ -94,11 +84,7 @@ export interface ExtractPdfFileParams {
   file: File
   requestJson: string
   template: LabelLayoutTemplate
-  classificationAgent: ClassificationAgentConfig
-  classificationThreshold?: number
   signal?: AbortSignal
-  onClassifyDone?: (outcome: PageOutcome | null, done: number, total: number) => void
-  onExtractionStart?: (total: number) => void
   onPageDone?: (outcome: PageOutcome, done: number, total: number) => void
   onStreamUpdate?: (event: LlmStreamEvent) => void
 }
@@ -106,7 +92,6 @@ export interface ExtractPdfFileParams {
 function emitStreamUpdate(
   onStreamUpdate: ExtractPdfFileParams['onStreamUpdate'],
   event: {
-    phase: LlmStreamEvent['phase']
     pageIndex: number
     totalPages: number
     snapshot: LlmStreamSnapshot
@@ -115,99 +100,37 @@ function emitStreamUpdate(
   if (!onStreamUpdate) return
   onStreamUpdate({
     ...event,
-    text: formatLlmStreamText(event.snapshot, {
-      preferCompleteJson: event.phase === 'extract',
-    }),
+    text: formatLlmStreamText(event.snapshot, { preferCompleteJson: true }),
   })
 }
 
-/**
- * 每页先以低分辨率预判；高置信度非目标页直接跳过，其余页面才渲染高清图并抽取。
- */
+/** 逐页渲染高清图并各请求一次大模型（无低清预判）。 */
 export async function extractPdfFileWithLlm(
   params: ExtractPdfFileParams,
 ): Promise<PdfExtractionResult> {
-  const threshold = params.classificationThreshold ?? 0.8
-  const fullImages: PdfPageImage[] = []
-  const prefiltered: PageOutcome[] = []
-
+  const images: PdfPageImage[] = []
   await processPdfPages(params.file, async (page) => {
     if (params.signal?.aborted) throw new DOMException('已中断', 'AbortError')
-    const lowResolution = await page.render({
-      maxDimension: 640,
-      jpegQuality: 0.58,
-    })
-    let classification
-    try {
-      classification = await classifyPageWithLlm({
-        image: lowResolution,
-        template: params.template,
-        agent: params.classificationAgent,
-        signal: params.signal,
-        onStream: (snapshot: LlmStreamSnapshot) => {
-          emitStreamUpdate(params.onStreamUpdate, {
-            phase: 'classify',
-            pageIndex: page.pageIndex,
-            totalPages: page.totalPages,
-            snapshot,
-          })
-        },
-      })
-    } catch (err) {
-      classification = {
-        isTarget: true,
-        confidence: 0,
-        reason: `预判失败，已回退到高清抽取：${
-          err instanceof Error ? err.message : '未知错误'
-        }`,
-        raw: '',
-      }
-    }
-
-    if (shouldSkipPage(classification, threshold)) {
-      const outcome: PageOutcome = {
-        pageIndex: page.pageIndex,
-        status: 'prefiltered',
-        raw: classification.raw,
-        classification: {
-          confidence: classification.confidence,
-          reason: classification.reason,
-        },
-      }
-      prefiltered.push(outcome)
-      params.onClassifyDone?.(outcome, page.pageIndex + 1, page.totalPages)
-      return
-    }
-
-    fullImages.push(
+    images.push(
       await page.render({
         maxDimension: 1280,
         jpegQuality: 0.75,
       }),
     )
-    params.onClassifyDone?.(null, page.pageIndex + 1, page.totalPages)
   })
-
-  params.onExtractionStart?.(fullImages.length)
-  const extracted = await extractPdfWithLlm({
-    images: fullImages,
+  return extractPdfWithLlm({
+    images,
     requestJson: params.requestJson,
     template: params.template,
     signal: params.signal,
     onPageDone: params.onPageDone,
     onStreamUpdate: params.onStreamUpdate,
   })
-  return {
-    ...extracted,
-    pageOutcomes: [...prefiltered, ...extracted.pageOutcomes].sort(
-      (left, right) => left.pageIndex - right.pageIndex,
-    ),
-  }
 }
 
 /**
- * 逐页调用 Qwen3-VL：模型在提示词中先判定 is_target 过滤无效页，
- * 再把有效页的发票头与子清单跨页聚合成完整结果
+ * 逐页调用 Qwen3-VL：每页 1 次请求；模型可返回 is_target 跳过无字段页，
+ * 有效页的发票头与子清单跨页聚合成完整结果。
  */
 export async function extractPdfWithLlm(
   params: ExtractPdfParams,
@@ -216,6 +139,7 @@ export async function extractPdfWithLlm(
   const headerKeys = new Set(template.headerFields.map((f) => f.key))
   const sublistKeys = new Set(template.sublistColumns.map((c) => c.key))
   const invoiceNoKey = findInvoiceNoKey(template)
+  const totalPages = images.length
 
   const invoices: AggregatedInvoice[] = []
   /** 出现在第一张发票之前的孤儿明细行（少见，但避免丢数据） */
@@ -234,9 +158,8 @@ export async function extractPdfWithLlm(
         signal,
         (snapshot) => {
           emitStreamUpdate(onStreamUpdate, {
-            phase: 'extract',
             pageIndex: image.pageIndex,
-            totalPages: images.length,
+            totalPages,
             snapshot,
           })
         },
@@ -259,13 +182,11 @@ export async function extractPdfWithLlm(
             : undefined
 
           if (existing) {
-            // 同一发票跨页：补齐缺失的头字段，追加明细行
             for (const [key, value] of Object.entries(header)) {
-              if (!existing.header[key]) existing.header[key] = value
+              if (!existing.header[key] && value) existing.header[key] = value
             }
             existing.sublist.push(...sublist)
           } else if (!hasValues(header) && invoices.length > 0) {
-            // 没有发票头只有明细，视为上一张发票的续表
             invoices[invoices.length - 1].sublist.push(...sublist)
           } else if (hasValues(header) || sublist.length > 0) {
             invoices.push({ header, sublist })
@@ -296,7 +217,7 @@ export async function extractPdfWithLlm(
     }
 
     pageOutcomes.push(outcome)
-    onPageDone?.(outcome, i + 1, images.length)
+    onPageDone?.(outcome, i + 1, totalPages)
   }
 
   if (pendingOrphans.length > 0) {
@@ -335,8 +256,7 @@ function keyRecordToIdRecord(
 ): Record<string, string> {
   const result: Record<string, string> = {}
   for (const field of fields) {
-    const value = record[field.key]
-    if (value) result[field.id] = value
+    result[field.id] = record[field.key] ?? ''
   }
   return result
 }
