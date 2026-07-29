@@ -76,6 +76,14 @@ export function buildDefaultUserPrompt(template: LabelLayoutTemplate): string {
     '- 只输出 JSON 本身',
   )
 
+  if (template.id === 'air_waybill') {
+    lines.push(
+      '',
+      '目标页判定：必须含空中运输单编号（Air Waybill Number）或运单明细行；',
+      '仅有发票号码、发票日期的首页封面/汇总页 is_target=false。',
+    )
+  }
+
   return lines.join('\n')
 }
 

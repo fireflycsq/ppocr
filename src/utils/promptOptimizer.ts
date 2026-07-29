@@ -83,6 +83,7 @@ function templateDescription(template: LabelLayoutTemplate): string {
         key,
         label,
       })),
+      classificationRules: template.classificationRules ?? [],
     },
     null,
     2,
@@ -162,7 +163,10 @@ async function optimizeClassificationAgent(
       role: 'user',
       content:
         `目标版式：\n${templateDescription(ctx.template)}\n` +
-        '下面提供目标/非目标样例各若干。只需学习「是否属于该版式」，不需要字段值。',
+        '下面提供目标/非目标样例各若干。只需学习「是否属于该版式」，不需要字段值。\n' +
+        (ctx.template.classificationRules?.length
+          ? `版式判定规则（生成的 hints 不得违背）：\n${ctx.template.classificationRules.map((item) => `- ${item}`).join('\n')}`
+          : ''),
     },
   ]
 
@@ -179,6 +183,7 @@ async function optimizeClassificationAgent(
       '请输出 {"classification_system_prompt":"...","classification_hints":["..."],"classification_model":""}。' +
       'classification_system_prompt 用于低清页级分类（只判 is_target，不抽字段）；' +
       'classification_hints 每条应是低分辨率下可观察的标题、版式、关键字或排除特征；' +
+      '必须体现版式判定规则：含运单编号/明细才是目标，仅发票号+日期多为封面应排除；' +
       'classification_model 留空表示与抽取共用同一模型，也可建议更小的视觉模型名。',
   })
 

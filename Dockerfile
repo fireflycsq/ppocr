@@ -18,7 +18,8 @@ RUN apk add --no-cache gettext
 
 COPY nginx.conf.template /etc/nginx/templates/default.conf.template
 COPY docker-entrypoint.sh /docker-entrypoint.sh
-RUN chmod +x /docker-entrypoint.sh
+# 从 Windows/Mac 拉代码时可能带 CRLF，会导致 exec: no such file or directory
+RUN sed -i 's/\r$//' /docker-entrypoint.sh && chmod +x /docker-entrypoint.sh
 COPY --from=builder /app/dist /usr/share/nginx/html
 
 ENV OCR_UPSTREAM=ocr:8000

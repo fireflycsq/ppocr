@@ -16,6 +16,8 @@ export interface LabelLayoutTemplate {
   sublistColumns: FieldDefinition[]
   defaultHeaderValues?: Record<string, string>
   defaultSublistRows?: Array<Record<string, string>>
+  /** 低清预判必须遵守的业务规则（写入分类 prompt） */
+  classificationRules?: string[]
 }
 
 export const LABEL_TEMPLATES: LabelLayoutTemplate[] = [
@@ -34,6 +36,11 @@ export const LABEL_TEMPLATES: LabelLayoutTemplate[] = [
         label: '空中运输单编号（Air Waybill Number）',
       },
       { id: 'c2', key: 'total', label: '收费（Total）' },
+    ],
+    classificationRules: [
+      '目标单证页必须包含空中运输单编号（Air Waybill Number），或可见的运单明细表格/逐行运单号；满足其一才可判 is_target=true。',
+      '仅出现发票号码（Invoice No.）、发票日期（Invoice Date）而无运单编号、无运单明细行的页面，多为 PDF 首页封面或汇总页，必须判 is_target=false。',
+      '封面/汇总页通常只有账单头信息或合计，不出现 Air Waybill Number 列头，也没有多行运单明细。',
     ],
   },
   {
