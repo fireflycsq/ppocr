@@ -45,7 +45,9 @@ import type {
 import {
   extractionToReviewData,
   extractPdfFileWithLlm,
+  type ModelPageImagePreview,
 } from '../utils/llmExtraction'
+import { downloadModelPageImage } from '../utils/downloadModelPageImage'
 
 type Phase = 'idle' | 'extract'
 
@@ -87,6 +89,10 @@ export default function OcrReviewPage() {
   const [llmStream, setLlmStream] = useState<{ label: string; text: string } | null>(
     null,
   )
+  const [modelPageImage, setModelPageImage] = useState<ModelPageImagePreview | null>(
+    null,
+  )
+  const modelPageImagesRef = useRef<Map<number, ModelPageImagePreview>>(new Map())
   const [extraction, setExtraction] = useState<PdfExtractionResult | null>(null)
   const [review, setReview] = useState<ReviewDocData | null>(null)
   const [note, setNote] = useState('')
@@ -150,6 +156,21 @@ export default function OcrReviewPage() {
     setLlmConfig(buildDefaultLlmConfig(template))
   }
 
+  const clearModelPageImages = () => {
+    modelPageImagesRef.current.clear()
+    setModelPageImage(null)
+  }
+
+  const handleDownloadModelPageImage = (pageIndex?: number) => {
+    if (!file) return
+    const image =
+      pageIndex === undefined
+        ? modelPageImage
+        : modelPageImagesRef.current.get(pageIndex) ?? null
+    if (!image) return
+    downloadModelPageImage(image, file.name)
+  }
+
   const handleFileSelect = (selected: File) => {
     if (previewUrl?.startsWith('blob:')) URL.revokeObjectURL(previewUrl)
     setFile(selected)
@@ -158,6 +179,7 @@ export default function OcrReviewPage() {
     setReview(null)
     setPageOutcomes([])
     setLlmStream(null)
+    clearModelPageImages()
     setNote('')
     setError(null)
     setStep('upload')
@@ -172,6 +194,7 @@ export default function OcrReviewPage() {
     setReview(null)
     setPageOutcomes([])
     setLlmStream(null)
+    clearModelPageImages()
     setNote('')
     setError(null)
     setPhase('idle')
@@ -190,6 +213,7 @@ export default function OcrReviewPage() {
     setError(null)
     setPageOutcomes([])
     setExtraction(null)
+    clearModelPageImages()
     setLlmStream({ label: '准备连接大模型…', text: '' })
     setPhase('extract')
     setProgress({ done: 0, total: 0 })
@@ -212,6 +236,10 @@ export default function OcrReviewPage() {
             label: `逐页抽取 · PDF 第 ${event.pageIndex + 1}/${event.totalPages} 页`,
             text: event.text,
           })
+        },
+        onPageImagePrepared: (image) => {
+          modelPageImagesRef.current.set(image.pageIndex, image)
+          setModelPageImage(image)
         },
       })
 
@@ -590,6 +618,8 @@ export default function OcrReviewPage() {
               isRecognizing={isRecognizing}
               ocrReady={llmReady}
               llmStream={llmStream}
+              modelPageImage={modelPageImage}
+              onDownloadModelPageImage={() => handleDownloadModelPageImage()}
               onFileSelect={handleFileSelect}
               onRunOcr={() => void handleRun()}
               onReset={handleReset}
@@ -665,6 +695,15 @@ export default function OcrReviewPage() {
                           : outcome.status === 'skipped'
                             ? '无目标字段，已跳过'
                             : `失败（${outcome.error ?? '未知错误'}）`}
+                        {modelPageImagesRef.current.has(outcome.pageIndex) && (
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-sm llm-page-image-download"
+                            onClick={() => handleDownloadModelPageImage(outcome.pageIndex)}
+                          >
+                            输入图
+                          </button>
+                        )}
                       </li>
                     ))}
                   </ul>

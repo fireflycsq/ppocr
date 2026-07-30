@@ -4,6 +4,7 @@ import type { LabelLayoutTemplate } from './labelTemplates'
 import { buildPageRequestBody } from './llmConfig'
 import type { PdfPageImage } from './pdfPageImages'
 import { processPdfPages } from './pdfPageImages'
+import type { ModelPageImagePreview } from './downloadModelPageImage'
 import {
   createEmptyInvoiceEntry,
   createEmptySublistRow,
@@ -62,6 +63,8 @@ function findInvoiceNoKey(template: LabelLayoutTemplate): string | null {
   return match?.key ?? template.headerFields[0]?.key ?? null
 }
 
+export type { ModelPageImagePreview } from './downloadModelPageImage'
+
 export interface LlmStreamEvent {
   pageIndex: number
   totalPages: number
@@ -78,6 +81,8 @@ export interface ExtractPdfParams {
   /** 每完成一页（无论成功/跳过/失败）回调一次 */
   onPageDone?: (outcome: PageOutcome, done: number, total: number) => void
   onStreamUpdate?: (event: LlmStreamEvent) => void
+  /** 每页请求模型前回调，便于预览/下载送入模型的 JPEG */
+  onPageImagePrepared?: (image: ModelPageImagePreview) => void
 }
 
 export interface ExtractPdfFileParams {
@@ -87,6 +92,7 @@ export interface ExtractPdfFileParams {
   signal?: AbortSignal
   onPageDone?: (outcome: PageOutcome, done: number, total: number) => void
   onStreamUpdate?: (event: LlmStreamEvent) => void
+  onPageImagePrepared?: (image: ModelPageImagePreview) => void
 }
 
 function emitStreamUpdate(
@@ -125,6 +131,7 @@ export async function extractPdfFileWithLlm(
     signal: params.signal,
     onPageDone: params.onPageDone,
     onStreamUpdate: params.onStreamUpdate,
+    onPageImagePrepared: params.onPageImagePrepared,
   })
 }
 
@@ -135,7 +142,8 @@ export async function extractPdfFileWithLlm(
 export async function extractPdfWithLlm(
   params: ExtractPdfParams,
 ): Promise<PdfExtractionResult> {
-  const { images, requestJson, template, signal, onPageDone, onStreamUpdate } = params
+  const { images, requestJson, template, signal, onPageDone, onStreamUpdate, onPageImagePrepared } =
+    params
   const headerKeys = new Set(template.headerFields.map((f) => f.key))
   const sublistKeys = new Set(template.sublistColumns.map((c) => c.key))
   const invoiceNoKey = findInvoiceNoKey(template)
@@ -152,6 +160,13 @@ export async function extractPdfWithLlm(
     let outcome: PageOutcome
 
     try {
+      onPageImagePrepared?.({
+        pageIndex: image.pageIndex,
+        totalPages,
+        base64: image.base64,
+        width: image.width,
+        height: image.height,
+      })
       const body = buildPageRequestBody(requestJson, image.base64)
       const { extraction: raw, rawContent } = await extractPageWithLlm(
         body,

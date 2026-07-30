@@ -1350,6 +1350,55 @@ body {
   word-break: break-word;
 }
 
+.llm-progress-pages li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.llm-page-image-download {
+  margin-left: 4px;
+  padding: 0 6px;
+  min-height: 24px;
+  font-size: 0.75rem;
+}
+
+.model-page-image-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-elevated, #f8fafc);
+}
+
+.model-page-image-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.8125rem;
+}
+
+.model-page-image-header span {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.model-page-image-preview {
+  display: block;
+  width: 100%;
+  max-height: 320px;
+  object-fit: contain;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+}
+
 .ocr-text-list {
   margin-top: 12px;
   background: var(--surface);

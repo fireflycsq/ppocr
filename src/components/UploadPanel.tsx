@@ -1,5 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { PdfPreview } from './PdfPreview'
+import type { ModelPageImagePreview } from '../utils/downloadModelPageImage'
+import { modelPageImageDataUrl } from '../utils/downloadModelPageImage'
 
 export interface LlmStreamPreview {
   label: string
@@ -14,6 +16,9 @@ interface UploadPanelProps {
   ocrReady?: boolean
   /** 抽取过程中的流式模型输出 */
   llmStream?: LlmStreamPreview | null
+  /** 当前页送入模型前的 JPEG 预览 */
+  modelPageImage?: ModelPageImagePreview | null
+  onDownloadModelPageImage?: () => void
   onFileSelect: (file: File) => void
   onRunOcr: () => void
   onReset: () => void
@@ -29,6 +34,8 @@ export function UploadPanel({
   isRecognizing,
   ocrReady = true,
   llmStream = null,
+  modelPageImage = null,
+  onDownloadModelPageImage,
   onFileSelect,
   onRunOcr,
   onReset,
@@ -112,6 +119,32 @@ export function UploadPanel({
               重置
             </button>
           </div>
+
+          {modelPageImage && (
+            <div className="model-page-image-panel">
+              <div className="model-page-image-header">
+                <strong>
+                  送入模型的图片 · 第 {modelPageImage.pageIndex + 1}/
+                  {modelPageImage.totalPages} 页
+                </strong>
+                <span>
+                  {modelPageImage.width}×{modelPageImage.height} · JPEG 75%
+                </span>
+              </div>
+              <img
+                className="model-page-image-preview"
+                src={modelPageImageDataUrl(modelPageImage.base64)}
+                alt={`PDF 第 ${modelPageImage.pageIndex + 1} 页模型输入图`}
+              />
+              <button
+                type="button"
+                className="btn btn-outline btn-sm"
+                onClick={onDownloadModelPageImage}
+              >
+                下载此页模型输入图
+              </button>
+            </div>
+          )}
 
           {isRecognizing && llmStream && (
             <div className="llm-stream-live">
