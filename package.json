@@ -8,10 +8,11 @@
     "dev:server": "cd server && .venv/bin/uvicorn main:app --reload --port 8000",
     "dev:label": "cd server && .venv/bin/pip install -q -r requirements-label.txt && .venv/bin/python -m uvicorn label_server:app --reload --port 8001",
     "build": "tsc && vite build",
-    "test": "node scripts/test-llm-workflow.mjs && cd server && python3 test_examples.py",
+    "test": "node scripts/test-llm-workflow.mjs && node scripts/test-accuracy-stats.mjs && cd server && python3 test_examples.py",
     "preview": "vite preview"
   },
   "dependencies": {
+    "fflate": "^0.8.3",
     "json5": "^2.2.3",
     "pdfjs-dist": "3.11.174",
     "react": "^18.3.1",
