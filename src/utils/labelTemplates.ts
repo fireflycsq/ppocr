@@ -18,13 +18,15 @@ export interface LabelLayoutTemplate {
   defaultSublistRows?: Array<Record<string, string>>
   /** 低清预判必须遵守的业务规则（写入分类 prompt） */
   classificationRules?: string[]
+  /** 明细行必填列 key：这些列为空的明细行会被过滤；整页无有效内容时按跳过处理 */
+  requiredSublistKeys?: string[]
 }
 
 export const LABEL_TEMPLATES: LabelLayoutTemplate[] = [
   {
     id: 'air_waybill',
-    name: '空运单版式',
-    description: '发票号码、发票日期 + 空中运输单编号 / 收费',
+    name: '空运单版式（FedEx）',
+    description: '发票号码、发票日期 + 空中运输单编号 / 收费（INVOICE 發票双语发票）',
     headerFields: [
       { id: 'h1', key: 'invoice_no', label: '发票号码' },
       { id: 'h2', key: 'invoice_date', label: '发票日期' },
@@ -38,10 +40,35 @@ export const LABEL_TEMPLATES: LabelLayoutTemplate[] = [
       { id: 'c2', key: 'total', label: '收费（Total）' },
     ],
     classificationRules: [
-      '目标单证页必须包含空中运输单编号（Air Waybill Number），或可见的运单明细表格/逐行运单号；满足其一才可判 is_target=true。',
-      '仅出现发票号码（Invoice No.）、发票日期（Invoice Date）而无运单编号、无运单明细行的页面，多为 PDF 首页封面或汇总页，必须判 is_target=false。',
-      '封面/汇总页通常只有账单头信息或合计，不出现 Air Waybill Number 列头，也没有多行运单明细。',
+      '目标单证页顶部中央印有 INVOICE 發票（DUTIES, TAXES & OTHER CHARGES 進口關稅及其他收費），且包含 Details by Payment Type 詳細資料(按付款項目) 明细区域。',
+      '明细区域必须至少出现一处空运提单号（Air Waybill Number 空運提單號）及对应编号，才可判 is_target=true。',
+      '只有 Summary by Payment Type 付款項目摘要、Grand Total、付款方式说明（FPS、QR Pay 等）或 Remittance Slip 郵遞付款單 的汇总首页，必须判 is_target=false。',
+      '仅出现发票号码、发票日期而无空运提单号明细的页面，多为封面、汇总页或付款回执，必须判 is_target=false。',
     ],
+    requiredSublistKeys: ['air_waybill_number'],
+  },
+  {
+    id: 'air_waybill_dhl',
+    name: '空运单版式（DHL）',
+    description: '发票号码、发票日期 + 空中运输单编号 / 收费（DHL 发票）',
+    headerFields: [
+      { id: 'dh1', key: 'invoice_no', label: '发票号码' },
+      { id: 'dh2', key: 'invoice_date', label: '发票日期' },
+    ],
+    sublistColumns: [
+      {
+        id: 'dc1',
+        key: 'air_waybill_number',
+        label: '空中运输单编号（Air Waybill Number）',
+      },
+      { id: 'dc2', key: 'total', label: '收费（Total）' },
+    ],
+    classificationRules: [
+      '目标单证页必须包含运单明细表格：表头出现 Air Waybill Number、Shipment Date、Origin / Consignor、Destination / Consignee、Total 等列，且 Air Waybill Number 列下方至少有一个具体运单号。',
+      '只有 Type of Service 汇总表、Analysis of Extra Charges（附加费分析）、Total Amount (HKD)、Payment Instructions（付款指引）或银行转账/支票说明的汇总首页，必须判 is_target=false。',
+      '封面页、合同条款、报关随附资料、空白页必须判 is_target=false。',
+    ],
+    requiredSublistKeys: ['air_waybill_number'],
   },
   {
     id: 'freight_invoice',
@@ -72,10 +99,17 @@ export const LABEL_TEMPLATES: LabelLayoutTemplate[] = [
       { id: 'fc1', key: 'description', label: '描述（DESCRIPTION）' },
       { id: 'fc2', key: 'charges_in_hkd', label: '收费（CHARGES IN HKD）' },
     ],
+    classificationRules: [
+      '目标单证页上部印有 INVOICE 及紧随其后的发票编号，右侧有 INVOICE DATE、CUSTOMER ID、TERMS、INCOTERM 等发票信息网格表，中部有 SHIPMENT DETAILS 装运信息区域。',
+      '页面必须包含 CHARGES 费用明细表格（DESCRIPTION / CHARGES IN HKD），且至少有一行费用项目，才可判 is_target=true。',
+      '页面底部有 TOTAL CHARGES 合计区（SUBTOTAL、TOTAL HKD）。',
+      '纯付款通知/付款回执（Payment Advice）、对账单、封面页或没有费用明细行的页面，必须判 is_target=false。',
+    ],
+    requiredSublistKeys: ['description'],
     defaultHeaderValues: {
-      supplier: 'GEODIS HONG KONG Limited',
+      supplier: 'GEODIS Hong Kong Limited',
       terms: '15 days from Inv. Date',
-      incoterm: 'FOB-Free On board',
+      incoterm: 'FOB - Free On Board',
     },
     defaultSublistRows: [
       {

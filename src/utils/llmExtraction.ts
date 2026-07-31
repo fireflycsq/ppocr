@@ -146,6 +146,12 @@ export async function extractPdfWithLlm(
     params
   const headerKeys = new Set(template.headerFields.map((f) => f.key))
   const sublistKeys = new Set(template.sublistColumns.map((c) => c.key))
+  const requiredSublistKeys = (template.requiredSublistKeys ?? []).filter((key) =>
+    sublistKeys.has(key),
+  )
+  /** 明细行必须有值，且必填列（如空运单号）不能为空 */
+  const isValidSublistRow = (row: Record<string, string>): boolean =>
+    hasValues(row) && requiredSublistKeys.every((key) => row[key]?.length > 0)
   const invoiceNoKey = findInvoiceNoKey(template)
   const totalPages = images.length
 
@@ -183,43 +189,56 @@ export async function extractPdfWithLlm(
       if (!raw.isTarget) {
         outcome = { pageIndex: image.pageIndex, status: 'skipped', raw: rawContent }
       } else {
-        for (const rawInvoice of raw.invoices) {
-          const header = coerceRecord(rawInvoice.header, headerKeys)
-          const sublist = rawInvoice.sublist
+        const pageInvoices = raw.invoices.map((rawInvoice) => ({
+          header: coerceRecord(rawInvoice.header, headerKeys),
+          sublist: rawInvoice.sublist
             .map((row) => coerceRecord(row, sublistKeys))
-            .filter(hasValues)
-
-          const invoiceNo = invoiceNoKey ? (header[invoiceNoKey] ?? '') : ''
-          const existing = invoiceNo
-            ? invoices.find(
-                (inv) => invoiceNoKey && inv.header[invoiceNoKey] === invoiceNo,
-              )
-            : undefined
-
-          if (existing) {
-            for (const [key, value] of Object.entries(header)) {
-              if (!existing.header[key] && value) existing.header[key] = value
-            }
-            existing.sublist.push(...sublist)
-          } else if (!hasValues(header) && invoices.length > 0) {
-            invoices[invoices.length - 1].sublist.push(...sublist)
-          } else if (hasValues(header) || sublist.length > 0) {
-            invoices.push({ header, sublist })
-          }
-        }
-
+            .filter(isValidSublistRow),
+        }))
         const orphans = raw.orphanSublist
           .map((row) => coerceRecord(row, sublistKeys))
-          .filter(hasValues)
-        if (orphans.length > 0) {
-          if (invoices.length > 0) {
-            invoices[invoices.length - 1].sublist.push(...orphans)
-          } else {
-            pendingOrphans.push(...orphans)
-          }
-        }
+          .filter(isValidSublistRow)
 
-        outcome = { pageIndex: image.pageIndex, status: 'target', raw: rawContent }
+        const pageHasContent =
+          orphans.length > 0 ||
+          pageInvoices.some(
+            (invoice) => hasValues(invoice.header) || invoice.sublist.length > 0,
+          )
+
+        if (!pageHasContent) {
+          // 模型判为目标页但没有任何有效字段/必填明细（如缺空运单号），按跳过处理
+          outcome = { pageIndex: image.pageIndex, status: 'skipped', raw: rawContent }
+        } else {
+          for (const { header, sublist } of pageInvoices) {
+            const invoiceNo = invoiceNoKey ? (header[invoiceNoKey] ?? '') : ''
+            const existing = invoiceNo
+              ? invoices.find(
+                  (inv) => invoiceNoKey && inv.header[invoiceNoKey] === invoiceNo,
+                )
+              : undefined
+
+            if (existing) {
+              for (const [key, value] of Object.entries(header)) {
+                if (!existing.header[key] && value) existing.header[key] = value
+              }
+              existing.sublist.push(...sublist)
+            } else if (!hasValues(header) && invoices.length > 0) {
+              invoices[invoices.length - 1].sublist.push(...sublist)
+            } else if (hasValues(header) || sublist.length > 0) {
+              invoices.push({ header, sublist })
+            }
+          }
+
+          if (orphans.length > 0) {
+            if (invoices.length > 0) {
+              invoices[invoices.length - 1].sublist.push(...orphans)
+            } else {
+              pendingOrphans.push(...orphans)
+            }
+          }
+
+          outcome = { pageIndex: image.pageIndex, status: 'target', raw: rawContent }
+        }
       }
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') throw err

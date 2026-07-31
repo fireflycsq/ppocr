@@ -10,7 +10,7 @@ export interface LlmExtractionConfig {
   requestJson: string
 }
 
-export const DEFAULT_LLM_MODEL = 'qwen3-vl'
+export const DEFAULT_LLM_MODEL = 'qwen3-vl:4b'
 
 /** 请求 JSON 中的页图片占位符，发送时替换为当页 base64 */
 export const PAGE_IMAGE_PLACEHOLDER = '{{PAGE_IMAGE}}'
@@ -25,12 +25,219 @@ const DEFAULT_SYSTEM_PROMPT = [
   '整页只输出一次 JSON，完成后立即停止，不要重复输出相同结构。',
 ].join('\n')
 
+/** 目标单证抽取（空运单/海运发票版式）共用系统提示词 */
+const TARGET_INVOICE_SYSTEM_PROMPT = [
+  '你是专业的发票信息抽取助手。先判断传入的页面图片是否为目标单证：非目标单证不抽取任何字段；目标单证按用户要求精准抽取指定字段。',
+  '你必须只输出一个合法的 JSON 对象，禁止输出解释、注释或 Markdown 代码块。',
+  '只依据当前页图片作答，禁止编造图片中不存在的内容，禁止照抄示例中的具体值。',
+  '整页只输出一次 JSON，完成后立即停止，禁止重复输出相同结构。',
+].join('\n')
+
+/** FedEx 空运单版式专用抽取提示词：只认含空运提单号明细块的付款项目明细页 */
+const AIR_WAYBILL_USER_PROMPT = `### 目标单证判定（is_target）
+当前页必须同时满足以下 3 个特征，才判定为目标单证（is_target=true）：
+1. 页面顶部中央印有 \`INVOICE 發票\`（下方通常有 \`DUTIES, TAXES & OTHER CHARGES 進口關稅及其他收費\`），页面带有 \`Page\` 页码；
+2. 页面包含明细区域 \`Details by Payment Type 詳細資料(按付款項目)\`；
+3. 明细区域中至少出现一处 \`Air Waybill Number 空運提單號\` 标签及其对应编号。
+
+出现以下任一情况判为非目标单证（is_target=false，invoices 与 orphan_sublist 均输出 []，不抽取任何字段）：
+- 汇总首页：只有 \`Summary by Payment Type 付款項目摘要\`、\`Grand Total 總計\`、付款方式说明（FPS、QR Pay、银行账户等）或 \`Remittance Slip 郵遞付款單\`，没有任何 \`Air Waybill Number 空運提單號\` 明细；
+- 封面页、付款通知/回执、合同条款、报关随附资料、空白页；
+- 页面虽印有 \`INVOICE 發票\`，但没有按付款项目的明细块。
+
+### 字段抽取（仅当 is_target=true 时执行）
+1. 发票头 header（页面上部信息区）：
+   - invoice_no：\`Invoice Number 發票號碼\` 标签右侧或下方的编号；
+   - invoice_date：\`Invoice Date 發票日期\` 标签右侧或下方的日期，保持原文格式。
+2. 明细 sublist（一个明细块输出一行，逐块抽取、不合并、不遗漏）：
+   - 分块：以 \`Ship Date 寄件日期\` 开头、以 \`Total 合計\` 结尾的区域为一个独立明细块；
+   - air_waybill_number：该块内 \`Air Waybill Number 空運提單號\` 标签同一行右侧的编号，严禁取其他块或无关位置的编号；
+   - total：该块内 \`Total 合計\` 标签同一行右侧的金额，必须是该块最终合计，严禁取 \`Other Charges 其它費用\`、\`Duty & Tax 稅項\`、\`Conversion Rate 兌換率\` 等其他数字；
+   - 页面底部的 \`Bill Shipper Subtotal\` 小计行不是明细块，严禁作为明细输出；
+   - 块内没有 air_waybill_number 的明细块直接丢弃，不要输出。
+
+### 数据清洗
+- total 只保留数字、小数点与负号，去掉 HKD、$、逗号与空格；
+- invoice_no、air_waybill_number 保持原文字符串，仅去除首尾空格；
+- 某字段缺失时对应值填 null；本页没有有效明细时 sublist 输出 []；
+- 本页只有明细块、发票头出现在之前页时：明细放入 orphan_sublist，invoices 输出 []。
+
+### 输出格式
+只输出一个标准 JSON 对象，禁止 Markdown 标记、解释说明或重复文本。结构如下（示例值仅示意结构，禁止照抄）：
+{
+  "is_target": true,
+  "invoices": [
+    {
+      "header": {"invoice_no": "12345678", "invoice_date": "01 Nov 2025"},
+      "sublist": [
+        {"air_waybill_number": "999-12345678", "total": "1500.00"}
+      ]
+    }
+  ],
+  "orphan_sublist": []
+}
+
+当 is_target 为 false 时，invoices 与 orphan_sublist 必须为空数组 []。`
+
+/** DHL 空运单版式专用抽取提示词：只认含运单号明细行的运单明细页 */
+const AIR_WAYBILL_DHL_USER_PROMPT = `### 目标单证判定（is_target）
+当前页必须同时满足以下 2 个特征，才判定为目标单证（is_target=true）：
+1. 页面包含运单明细表格，表头出现 \`Air Waybill Number\`、\`Shipment Date\`、\`Origin / Consignor\`、\`Destination / Consignee\`、\`Total\` 等列；
+2. \`Air Waybill Number\` 列下方至少有一个具体的运单号。
+
+出现以下任一情况判为非目标单证（is_target=false，invoices 与 orphan_sublist 均输出 []，不抽取任何字段）：
+- 汇总首页：只有 \`Type of Service\` 汇总表、\`Analysis of Extra Charges\`（附加费分析）、\`Total Amount (HKD)\`、\`Payment Instructions\`（付款指引）或银行转账/支票付款说明，没有运单明细表格；
+- 只有汇总金额、说明文字而没有任何具体运单号的页面；
+- 封面页、合同条款、报关随附资料、空白页。
+
+### 字段抽取（仅当 is_target=true 时执行）
+1. 发票头 header（页面上部的发票信息框）：
+   - invoice_no：\`Invoice Number\` 标签右侧的编号；
+   - invoice_date：\`Invoice Date\` 标签右侧的日期，保持原文格式。
+2. 明细 sublist（一个运单号对应一个明细块，一块输出一行，不合并、不遗漏）：
+   - air_waybill_number：\`Air Waybill Number\` 列中的运单号；
+   - total：该运单块 \`Total\` 列最下方的合计金额（该运单全部费用之和）；块内每条费用行（如 REGULATORY CHARGES、DUTY TAX PAID）也各有金额，严禁取单条费用行的金额或 \`Extra Charges Amount\` 列的数字；
+   - \`Service Sub Total\`、\`Total: HKD:\` 等小计/合计行不是运单明细，严禁输出；
+   - 没有运单号的行直接丢弃，不要输出。
+
+### 数据清洗
+- total 只保留数字、小数点与负号，去掉货币符号、逗号与空格；
+- invoice_no、air_waybill_number 保持原文字符串，仅去除首尾空格；
+- 某字段缺失时对应值填 null；本页没有有效明细时 sublist 输出 []；
+- 本页只有运单明细、发票头出现在之前页时：明细放入 orphan_sublist，invoices 输出 []。
+
+### 输出格式
+只输出一个标准 JSON 对象，禁止 Markdown 标记、解释说明或重复文本。结构如下（示例值仅示意结构，禁止照抄）：
+{
+  "is_target": true,
+  "invoices": [
+    {
+      "header": {"invoice_no": "12345678", "invoice_date": "01 Nov 2025"},
+      "sublist": [
+        {"air_waybill_number": "1234567890", "total": "1500.00"}
+      ]
+    }
+  ],
+  "orphan_sublist": []
+}
+
+当 is_target 为 false 时，invoices 与 orphan_sublist 必须为空数组 []。`
+
+/** 海运/货代发票版式（GEODIS）专用抽取提示词：只认含 CHARGES 费用明细行的正式发票页 */
+const FREIGHT_INVOICE_USER_PROMPT = `### 目标单证判定（is_target）
+当前页必须同时满足以下 2 个特征，才判定为目标单证（is_target=true）：
+1. 页面为正式货运/海运发票：上部印有 \`INVOICE\` 及紧随其后的发票编号，右侧有发票信息网格表（\`INVOICE DATE\`、\`CUSTOMER ID\`、\`SHIPMENT\`、\`DUE DATE\`、\`TERMS\`、\`INCOTERM\` 等），中部有 \`SHIPMENT DETAILS\` 装运信息区域；
+2. 页面包含 \`CHARGES\` 费用明细表格（列头为 \`DESCRIPTION\` 与 \`CHARGES IN HKD\`），且至少有一行费用项目（费用描述 + 金额）。
+
+出现以下任一情况判为非目标单证（is_target=false，invoices 与 orphan_sublist 均输出 []，不抽取任何字段）：
+- 纯付款通知/付款回执（Payment Advice）、对账单、封面页、合同条款、报关随附资料、空白页；
+- 页面只有地址、合计金额或说明文字，没有任何费用明细行。
+
+### 字段抽取（仅当 is_target=true 时执行）
+1. 发票头 header：
+   - supplier：页面右上角的公司抬头名称（发票开具方）；
+   - invoice_no：页面左上方 \`INVOICE\` 字样右侧的发票编号；
+   - invoice_date：右侧网格表 \`INVOICE DATE\` 的日期，保持原文格式；
+   - terms：网格表 \`TERMS\` 的付款条款（如 15 days from Inv. Date）；
+   - incoterm：网格表 \`INCOTERM\` 的贸易条款（如 FOB - Free On Board）；
+   - weight：\`SHIPMENT DETAILS\` 区域 \`WEIGHT\` 的值（含单位）；
+   - volume：\`SHIPMENT DETAILS\` 区域 \`VOLUME\` 的值（含单位）；
+   - packages：\`SHIPMENT DETAILS\` 区域 \`PACKAGES\` 的值；
+   - vessel_voyage_imo：\`VESSEL / VOYAGE / IMO(LLOYDS)\` 单元格的内容；
+   - house_bill_of_lading：\`HOUSE BILL OF LADING\` 单元格的提单号，严禁取 \`OCEAN BILL OF LADING\` 的编号；
+   - total_hkd：页面底部 \`TOTAL CHARGES\` 区域中 \`TOTAL HKD\` 的金额，严禁取 \`SUBTOTAL\` 的金额。
+2. 费用明细 sublist（\`CHARGES\` 表格逐行读取，一行费用输出一行，不合并、不遗漏）：
+   - description：\`DESCRIPTION\` 列的费用描述；
+   - charges_in_hkd：同一行 \`CHARGES IN HKD\` 列的金额；
+   - \`SUBTOTAL\`、\`TOTAL HKD\` 等小计/合计行不属于费用明细，严禁放入 sublist；没有费用描述的行直接丢弃。
+
+### 数据清洗
+- charges_in_hkd、total_hkd 只保留数字、小数点与负号，去掉 HKD、$、逗号与空格；
+- 其余字段保持原文字符串，仅去除首尾空格；
+- 某字段缺失时对应值填 null；本页没有有效明细时 sublist 输出 []；
+- 本页只有费用明细、发票头出现在之前页时：明细放入 orphan_sublist，invoices 输出 []。
+
+### 输出格式
+只输出一个标准 JSON 对象，禁止 Markdown 标记、解释说明或重复文本。结构如下（示例值仅示意结构，禁止照抄）：
+{
+  "is_target": true,
+  "invoices": [
+    {
+      "header": {
+        "supplier": "GEODIS Hong Kong Limited",
+        "invoice_no": "12345678",
+        "invoice_date": "01 Nov 2025",
+        "incoterm": "FOB - Free On Board",
+        "terms": "15 days from Inv. Date",
+        "weight": "100.00 KGM",
+        "volume": "1.00 CBM",
+        "packages": "10",
+        "vessel_voyage_imo": "VESSEL 123W",
+        "house_bill_of_lading": "HBL12345678",
+        "total_hkd": "1925.00"
+      },
+      "sublist": [
+        {"description": "Bill of Lading Fee - Base Rate HKD 650.00", "charges_in_hkd": "650.00"}
+      ]
+    }
+  ],
+  "orphan_sublist": []
+}
+
+当 is_target 为 false 时，invoices 与 orphan_sublist 必须为空数组 []。`
+
+/** 空运单明细页通常一页十几个明细块，需要更大的上下文与输出长度 */
+const AIR_WAYBILL_EXTRACT_OPTIONS: Record<string, unknown> = {
+  temperature: 0,
+  num_ctx: 25600,
+  num_predict: 12288,
+  repeat_penalty: 1.1,
+}
+
+const DEFAULT_EXTRACT_OPTIONS: Record<string, unknown> = {
+  temperature: 0,
+  num_ctx: 8192,
+  num_predict: 4096,
+}
+
+/** 内置了专用提示词的版式 id */
+const TARGET_INVOICE_TEMPLATE_IDS = new Set([
+  'air_waybill',
+  'air_waybill_dhl',
+  'freight_invoice',
+])
+
+/** 空运单明细页（FedEx/DHL）通常一页十几条明细，需要更大的上下文与输出长度 */
+const AIR_WAYBILL_TEMPLATE_IDS = new Set(['air_waybill', 'air_waybill_dhl'])
+
+function defaultSystemPromptFor(template: LabelLayoutTemplate): string {
+  return TARGET_INVOICE_TEMPLATE_IDS.has(template.id)
+    ? TARGET_INVOICE_SYSTEM_PROMPT
+    : DEFAULT_SYSTEM_PROMPT
+}
+
+function defaultOptionsFor(template: LabelLayoutTemplate): Record<string, unknown> {
+  return AIR_WAYBILL_TEMPLATE_IDS.has(template.id)
+    ? { ...AIR_WAYBILL_EXTRACT_OPTIONS }
+    : { ...DEFAULT_EXTRACT_OPTIONS }
+}
+
 function fieldLines(fields: FieldDefinition[]): string {
   return fields.map((field) => `- ${field.key}：${field.label}`).join('\n')
 }
 
 /** 根据版式的字段配置生成默认的抽取提示词 */
 export function buildDefaultUserPrompt(template: LabelLayoutTemplate): string {
+  if (template.id === 'air_waybill') {
+    return AIR_WAYBILL_USER_PROMPT
+  }
+  if (template.id === 'air_waybill_dhl') {
+    return AIR_WAYBILL_DHL_USER_PROMPT
+  }
+  if (template.id === 'freight_invoice') {
+    return FREIGHT_INVOICE_USER_PROMPT
+  }
+
   const hasSublist = template.sublistColumns.length > 0
   const lines: string[] = [
     '这是一份单证 PDF 中的一页。请先判断该页是否包含下述目标字段，再按要求抽取。',
@@ -77,14 +284,6 @@ export function buildDefaultUserPrompt(template: LabelLayoutTemplate): string {
     '- 图片中未出现的字段在 JSON 中省略或填空字符串，不要编造',
   )
 
-  if (template.id === 'air_waybill') {
-    lines.push(
-      '',
-      '目标页判定：必须含空中运输单编号（Air Waybill Number）或运单明细行；',
-      '仅有发票号码、发票日期的首页封面/汇总页 is_target=false。',
-    )
-  }
-
   return lines.join('\n')
 }
 
@@ -104,13 +303,9 @@ function buildRequestJsonText(
     stream: true,
     think: false,
     format: 'json',
-    options: parts.options ?? {
-      temperature: 0,
-      num_ctx: 8192,
-      num_predict: 4096,
-    },
+    options: parts.options ?? defaultOptionsFor(template),
     messages: [
-      { role: 'system', content: parts.systemPrompt ?? DEFAULT_SYSTEM_PROMPT },
+      { role: 'system', content: parts.systemPrompt ?? defaultSystemPromptFor(template) },
       {
         role: 'user',
         content: parts.userPrompt ?? buildDefaultUserPrompt(template),

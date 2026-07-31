@@ -42,7 +42,12 @@ try {
       })
       assert.equal(parseRequestJson(request).error, null)
       const body = buildPageRequestBody(request, 'base64-image')
-      assert.deepEqual(body.options, { temperature: 0 })
+      assert.deepEqual(body.options, {
+        temperature: 0,
+        num_ctx: 8192,
+        num_predict: 4096,
+        repeat_penalty: 1.12,
+      })
       assert.deepEqual(body.messages[0].images, ['base64-image'])
 
       globalThis.fetch = async () =>
