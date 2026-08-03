@@ -13,6 +13,7 @@ from llm_extract import (
     build_page_request_body,
     document_export_file_name,
     extract_json_text,
+    loads_json_lenient,
     normalize_extraction,
 )
 
@@ -21,6 +22,12 @@ class LlmExtractHelpersTest(unittest.TestCase):
     def test_extract_json_text_from_fence(self):
         text = '说明\n```json\n{"is_target": true}\n```\n'
         self.assertEqual(extract_json_text(text), '{"is_target": true}')
+
+    def test_loads_json_lenient_trailing_comma(self):
+        raw = '{\n  "model": "x",\n  "messages": [{\n    "role": "user",\n    "content": "hi",\n  }],\n}'
+        parsed = loads_json_lenient(raw)
+        self.assertEqual(parsed["model"], "x")
+        self.assertEqual(parsed["messages"][0]["role"], "user")
 
     def test_normalize_extraction(self):
         parsed = {

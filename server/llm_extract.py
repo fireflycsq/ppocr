@@ -202,11 +202,29 @@ def _replace_placeholder(value: Any, image_base64: str) -> Tuple[Any, bool]:
     return value, False
 
 
+def loads_json_lenient(text: str) -> Any:
+    """兼容前端配置：标准 JSON，并自动去掉对象/数组末尾多余逗号。"""
+    current = text.strip()
+    last_error: Optional[json.JSONDecodeError] = None
+    for _ in range(8):
+        try:
+            return json.loads(current)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+            fixed = re.sub(r",\s*([}\]])", r"\1", current)
+            if fixed == current:
+                break
+            current = fixed
+    if last_error:
+        raise last_error
+    raise json.JSONDecodeError("JSON 无效", text, 0)
+
+
 def build_page_request_body(
     request_json: str, image_base64: str
 ) -> Dict[str, Any]:
     try:
-        body = json.loads(request_json)
+        body = loads_json_lenient(request_json)
     except json.JSONDecodeError as exc:
         raise LlmExtractError(f"请求 JSON 无效：{exc}") from exc
     if not isinstance(body, dict):

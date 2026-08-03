@@ -24,6 +24,7 @@ from llm_extract import (
     build_export_payload,
     document_export_file_name,
     extract_pdf_with_llm,
+    loads_json_lenient,
 )
 
 router = APIRouter(prefix="/api/label/llm-jobs", tags=["llm-jobs"])
@@ -526,9 +527,11 @@ async def create_llm_job(
         raise HTTPException(status_code=400, detail="required_sublist_keys 必须是数组")
 
     try:
-        body = json.loads(request_json)
+        body = loads_json_lenient(request_json)
         if not isinstance(body, dict):
             raise ValueError("request_json 必须是对象")
+        # 落盘前写成标准 JSON，后续抽取不再受尾逗号影响
+        request_json = json.dumps(body, ensure_ascii=False)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"request_json 无效：{exc}") from exc
 

@@ -427,11 +427,13 @@ export default function OcrReviewPage() {
   const handleRun = async () => {
     if (files.length === 0 || (job && isJobActive(job.status))) return
 
-    const { error: requestError } = parseRequestJson(llmConfig.requestJson)
-    if (requestError) {
-      setError(`大模型请求配置有误：${requestError}`)
+    const parsedRequest = parseRequestJson(llmConfig.requestJson)
+    if (parsedRequest.error || !parsedRequest.body) {
+      setError(`大模型请求配置有误：${parsedRequest.error ?? '请求 JSON 无效'}`)
       return
     }
+    // 配置面板允许尾逗号/JSON5；提交前规范成标准 JSON，避免服务端 json.loads 失败
+    const normalizedRequestJson = JSON.stringify(parsedRequest.body)
 
     setError(null)
     setExtraction(null)
@@ -442,11 +444,11 @@ export default function OcrReviewPage() {
       const created = await createLlmJob({
         files,
         templateId,
-        requestJson: llmConfig.requestJson,
+        requestJson: normalizedRequestJson,
         headerFields: template.headerFields,
         sublistColumns: template.sublistColumns,
         requiredSublistKeys: template.requiredSublistKeys ?? [],
-        llmModel,
+        llmModel: parsedRequest.model || llmModel,
       })
       applyJobSnapshot(created)
       setFiles([])
