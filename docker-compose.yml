@@ -60,6 +60,9 @@ services:
       LABEL_DEFAULT_PASSWORD: ${LABEL_DEFAULT_PASSWORD:-admin123}
       LABEL_ALLOW_REGISTER: ${LABEL_ALLOW_REGISTER:-true}
       LABEL_EXAMPLE_MAX_MB: ${LABEL_EXAMPLE_MAX_MB:-25}
+      OLLAMA_BASE: http://${LLM_UPSTREAM:-host.docker.internal:11434}
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
     healthcheck:
       test:
         [

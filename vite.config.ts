@@ -12,6 +12,7 @@ export default defineConfig({
       '/api/label': {
         target: 'http://localhost:8001',
         changeOrigin: true,
+        timeout: 1800000,
       },
       '/api/llm': {
         target: 'http://localhost:11434',

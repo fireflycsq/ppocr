@@ -1,7 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { PdfPreview } from './PdfPreview'
-import type { ModelPageImagePreview } from '../utils/downloadModelPageImage'
-import { modelPageImageDataUrl } from '../utils/downloadModelPageImage'
+import type { LlmJob, JobDocument } from '../api/llmJobs'
 
 export interface LlmStreamPreview {
   label: string
@@ -9,36 +8,59 @@ export interface LlmStreamPreview {
 }
 
 interface UploadPanelProps {
-  file: File | null
+  files: File[]
+  /** 服务端任务中的文档列表（刷新恢复后可能没有本地 File） */
+  jobDocuments?: JobDocument[]
+  selectedDocId: string | null
   previewUrl: string | null
   isRecognizing: boolean
-  /** 大模型服务是否就绪 */
   ocrReady?: boolean
-  /** 抽取过程中的流式模型输出 */
   llmStream?: LlmStreamPreview | null
-  /** 当前页送入模型前的 JPEG 预览 */
-  modelPageImage?: ModelPageImagePreview | null
-  onDownloadModelPageImage?: () => void
-  onFileSelect: (file: File) => void
+  job?: LlmJob | null
+  onFilesSelect: (files: File[]) => void
+  onSelectDoc: (docId: string) => void
   onRunOcr: () => void
   onReset: () => void
+  onCancelJob?: () => void
+  onExportBatch?: () => void
 }
 
 function isPdfFile(file: File): boolean {
   return file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')
 }
 
+function statusLabel(status: JobDocument['status']): string {
+  switch (status) {
+    case 'queued':
+      return '排队中'
+    case 'running':
+      return '识别中'
+    case 'done':
+      return '已完成'
+    case 'error':
+      return '失败'
+    case 'cancelled':
+      return '已中断'
+    default:
+      return status
+  }
+}
+
 export function UploadPanel({
-  file,
+  files,
+  jobDocuments = [],
+  selectedDocId,
   previewUrl,
   isRecognizing,
   ocrReady = true,
   llmStream = null,
-  modelPageImage = null,
-  onDownloadModelPageImage,
-  onFileSelect,
+  job = null,
+  onFilesSelect,
+  onSelectDoc,
   onRunOcr,
   onReset,
+  onCancelJob,
+  onExportBatch,
 }: UploadPanelProps) {
   const inputRef = useRef<HTMLInputElement>(null)
   const streamRef = useRef<HTMLPreElement>(null)
@@ -50,65 +72,155 @@ export function UploadPanel({
   }, [llmStream?.text, llmStream?.label])
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const selected = e.target.files?.[0]
-    if (selected && isPdfFile(selected)) onFileSelect(selected)
+    const selected = Array.from(e.target.files ?? []).filter(isPdfFile)
+    if (selected.length > 0) onFilesSelect(selected)
     e.target.value = ''
   }
+
+  const listItems: Array<{
+    id: string
+    fileName: string
+    fileSize: number
+    status?: JobDocument['status']
+    progress?: { done: number; total: number }
+    error?: string | null
+  }> =
+    jobDocuments.length > 0
+      ? jobDocuments.map((doc) => ({
+          id: doc.id,
+          fileName: doc.fileName,
+          fileSize: doc.fileSize,
+          status: doc.status,
+          progress: doc.progress,
+          error: doc.error,
+        }))
+      : files.map((file, index) => ({
+          id: `local-${index}-${file.name}`,
+          fileName: file.name,
+          fileSize: file.size,
+        }))
+
+  const doneCount = jobDocuments.filter((d) => d.status === 'done').length
+  const totalCount = jobDocuments.length || files.length
 
   return (
     <div className="upload-panel-inner">
       <div
         className="upload-dropzone"
-        onClick={() => inputRef.current?.click()}
+        onClick={() => !isRecognizing && inputRef.current?.click()}
         onDragOver={(e) => e.preventDefault()}
         onDrop={(e) => {
           e.preventDefault()
-          const dropped = e.dataTransfer.files?.[0]
-          if (dropped && isPdfFile(dropped)) onFileSelect(dropped)
+          if (isRecognizing) return
+          const dropped = Array.from(e.dataTransfer.files ?? []).filter(isPdfFile)
+          if (dropped.length > 0) onFilesSelect(dropped)
         }}
       >
         <div className="upload-icon">📄</div>
-        <p className="upload-title">上传 PDF 单证</p>
+        <p className="upload-title">批量上传 PDF 单证</p>
         <p className="upload-hint">
-          单个 PDF 文件，Qwen3-VL 将逐页识别：自动过滤无关页并抽取字段
+          支持多选 / 拖拽多个 PDF；上传后由服务端排队识别，关闭页面也不会中断
         </p>
         <p className="upload-hint">点击选择或拖拽文件到此处</p>
         <input
           ref={inputRef}
           type="file"
           accept="application/pdf,.pdf"
+          multiple
           hidden
+          disabled={isRecognizing}
           onChange={handleChange}
         />
       </div>
 
-      {file && (
+      {listItems.length > 0 && (
         <div className="upload-preview-card">
           <div className="upload-file-info">
-            <strong>{file.name}</strong>
-            <span>{(file.size / 1024).toFixed(1)} KB</span>
+            <strong>
+              {totalCount} 个文件
+              {job ? ` · 任务 ${job.status}` : ''}
+              {doneCount > 0 ? ` · 已完成 ${doneCount}` : ''}
+            </strong>
+            {job?.current && (
+              <span>
+                当前：{job.current.fileName}
+                {job.current.totalPages > 0
+                  ? ` 第 ${job.current.pageIndex + 1}/${job.current.totalPages} 页`
+                  : ''}
+              </span>
+            )}
           </div>
+
+          <ul className="llm-batch-file-list">
+            {listItems.map((item) => {
+              const active = item.id === selectedDocId
+              const progress =
+                item.progress && item.progress.total > 0
+                  ? `${item.progress.done}/${item.progress.total}`
+                  : ''
+              return (
+                <li key={item.id}>
+                  <button
+                    type="button"
+                    className={`llm-batch-file-item ${active ? 'active' : ''} ${item.status ? `status-${item.status}` : ''}`}
+                    onClick={() => onSelectDoc(item.id)}
+                  >
+                    <span className="llm-batch-file-name" title={item.fileName}>
+                      {item.fileName}
+                    </span>
+                    <span className="llm-batch-file-meta">
+                      {(item.fileSize / 1024).toFixed(1)} KB
+                      {item.status ? ` · ${statusLabel(item.status)}` : ''}
+                      {progress ? ` · ${progress}` : ''}
+                    </span>
+                    {item.error && (
+                      <span className="llm-batch-file-error">{item.error}</span>
+                    )}
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
+
           {previewUrl && <PdfPreview url={previewUrl} className="upload-preview-pdf" />}
+
           <div className="upload-actions">
-            <button
-              type="button"
-              className="btn btn-primary btn-lg"
-              disabled={isRecognizing || !ocrReady}
-              onClick={onRunOcr}
-            >
-              {isRecognizing
-                ? '抽取中…'
-                : ocrReady
-                  ? '开始智能抽取'
-                  : '等待 Ollama 连接…'}
-            </button>
+            {!job && (
+              <button
+                type="button"
+                className="btn btn-primary btn-lg"
+                disabled={isRecognizing || !ocrReady || files.length === 0}
+                onClick={onRunOcr}
+              >
+                {isRecognizing
+                  ? '排队识别中…'
+                  : ocrReady
+                    ? `开始批量抽取（${files.length}）`
+                    : '等待 Ollama 连接…'}
+              </button>
+            )}
+            {job && isRecognizing && onCancelJob && (
+              <button type="button" className="btn btn-outline" onClick={onCancelJob}>
+                中断任务
+              </button>
+            )}
+            {job && doneCount > 0 && onExportBatch && (
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={onExportBatch}
+                disabled={isRecognizing && doneCount === 0}
+              >
+                导出结果 ZIP（{doneCount}）
+              </button>
+            )}
             <button
               type="button"
               className="btn btn-outline"
               disabled={isRecognizing}
               onClick={() => inputRef.current?.click()}
             >
-              更换文件
+              {job ? '新建任务并上传' : '添加/更换文件'}
             </button>
             <button
               type="button"
@@ -116,37 +228,11 @@ export function UploadPanel({
               disabled={isRecognizing}
               onClick={onReset}
             >
-              重置
+              清空
             </button>
           </div>
 
-          {modelPageImage && (
-            <div className="model-page-image-panel">
-              <div className="model-page-image-header">
-                <strong>
-                  送入模型的图片 · 第 {modelPageImage.pageIndex + 1}/
-                  {modelPageImage.totalPages} 页
-                </strong>
-                <span>
-                  {modelPageImage.width}×{modelPageImage.height} · JPEG 75%
-                </span>
-              </div>
-              <img
-                className="model-page-image-preview"
-                src={modelPageImageDataUrl(modelPageImage.base64)}
-                alt={`PDF 第 ${modelPageImage.pageIndex + 1} 页模型输入图`}
-              />
-              <button
-                type="button"
-                className="btn btn-outline btn-sm"
-                onClick={onDownloadModelPageImage}
-              >
-                下载此页模型输入图
-              </button>
-            </div>
-          )}
-
-          {isRecognizing && llmStream && (
+          {(isRecognizing || llmStream) && llmStream && (
             <div className="llm-stream-live">
               <div className="llm-stream-live-label">{llmStream.label}</div>
               <pre ref={streamRef} className="llm-stream-live-text">

@@ -1066,6 +1066,90 @@ body {
   gap: 8px;
 }
 
+.llm-batch-file-list {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.llm-batch-file-item {
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.llm-batch-file-item:hover {
+  border-color: #93c5fd;
+}
+
+.llm-batch-file-item.active {
+  border-color: #2563eb;
+  background: #eff6ff;
+}
+
+.llm-batch-file-item.status-running {
+  border-color: #38bdf8;
+}
+
+.llm-batch-file-item.status-done {
+  border-color: #86efac;
+}
+
+.llm-batch-file-item.status-error,
+.llm-batch-file-item.status-cancelled {
+  border-color: #fca5a5;
+}
+
+.llm-batch-file-name {
+  font-size: 0.875rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llm-batch-file-meta {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.llm-batch-file-error {
+  font-size: 0.75rem;
+  color: var(--danger);
+}
+
+.llm-batch-doc-progress {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.llm-batch-doc-progress-title {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.llm-batch-doc-progress-title span {
+  font-weight: 400;
+  color: var(--muted);
+}
+
 .llm-progress-header {
   display: flex;
   justify-content: space-between;

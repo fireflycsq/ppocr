@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import traceback
 
 from fastapi import FastAPI, Request
@@ -10,9 +11,11 @@ from fastapi.responses import JSONResponse
 
 from database import init_db
 from label_routes import maybe_seed_default_user, router
+from llm_jobs import router as llm_jobs_router, start_llm_job_worker
 
 app = FastAPI(title="PPOCR Label API", version="1.0.0")
 app.include_router(router)
+app.include_router(llm_jobs_router)
 
 
 @app.exception_handler(Exception)
@@ -29,6 +32,11 @@ async def startup() -> None:
         print("✓ 标注 API 已启动，默认用户已就绪")
     except Exception as exc:
         print(f"⚠ 默认用户创建失败（{exc}）")
+    try:
+        start_llm_job_worker(asyncio.get_running_loop())
+        print("✓ 预识别批量任务队列已启动")
+    except Exception as exc:
+        print(f"⚠ 预识别任务队列启动失败（{exc}）")
 
 
 @app.get("/health")

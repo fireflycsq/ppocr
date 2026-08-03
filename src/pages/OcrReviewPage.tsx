@@ -1,5 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { checkLlmHealth } from '../api/llm'
+import {
+  cancelLlmJob,
+  createLlmJob,
+  downloadJobExportZip,
+  fetchJobDocumentResult,
+  fetchLlmJob,
+  getStoredActiveJobId,
+  isJobActive,
+  jobDocumentFileUrl,
+  patchJobDocument,
+  setStoredActiveJobId,
+  subscribeLlmJobEvents,
+  type JobDocument,
+  type JobPageOutcome,
+  type LlmJob,
+} from '../api/llmJobs'
 import { LlmConfigPanel } from '../components/LlmConfigPanel'
 import { PdfPreview } from '../components/PdfPreview'
 import { UploadPanel } from '../components/UploadPanel'
@@ -37,37 +53,36 @@ import {
   parseRequestJson,
   saveLlmConfig,
 } from '../utils/llmConfig'
-import type {
-  PageOutcome,
-  PdfExtractionResult,
-  ReviewDocData,
-} from '../utils/llmExtraction'
-import {
-  extractionToReviewData,
-  extractPdfFileWithLlm,
-  type ModelPageImagePreview,
-} from '../utils/llmExtraction'
-import { downloadModelPageImage } from '../utils/downloadModelPageImage'
-
-type Phase = 'idle' | 'extract'
+import type { PageOutcome, PdfExtractionResult, ReviewDocData } from '../utils/llmExtraction'
+import { extractionToReviewData } from '../utils/llmExtraction'
 
 const WORKFLOW_STEPS = [
   { key: 'upload', label: '上传 PDF' },
-  { key: 'extract', label: '逐页抽取' },
+  { key: 'extract', label: '排队抽取' },
   { key: 'review', label: '字段审核' },
   { key: 'export', label: '导出 JSON' },
 ]
 
 function pageNumbers(outcomes: PageOutcome[], status: PageOutcome['status']): number[] {
   return outcomes
-    .filter((o) => o.status  === status)
+    .filter((o) => o.status === status)
     .map((o) => o.pageIndex + 1)
+}
+
+function toPageOutcomes(outcomes: JobPageOutcome[]): PageOutcome[] {
+  return outcomes.map((o) => ({
+    pageIndex: o.pageIndex,
+    status: o.status,
+    error: o.error,
+    raw: o.raw,
+  }))
 }
 
 export default function OcrReviewPage() {
   const [step, setStep] = useState<'upload' | 'review'>('upload')
-  const [file, setFile] = useState<File | null>(null)
+  const [files, setFiles] = useState<File[]>([])
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  const [selectedDocId, setSelectedDocId] = useState<string | null>(null)
 
   const [templateId, setTemplateId] = useState(DEFAULT_TEMPLATE_ID)
   const template = useMemo(() => getLabelTemplate(templateId), [templateId])
@@ -83,22 +98,19 @@ export default function OcrReviewPage() {
   const [llmReady, setLlmReady] = useState(false)
   const [llmModels, setLlmModels] = useState<string[]>([])
 
-  const [phase, setPhase] = useState<Phase>('idle')
-  const [progress, setProgress] = useState({ done: 0, total: 0 })
-  const [pageOutcomes, setPageOutcomes] = useState<PageOutcome[]>([])
+  const [job, setJob] = useState<LlmJob | null>(null)
   const [llmStream, setLlmStream] = useState<{ label: string; text: string } | null>(
     null,
   )
-  const [modelPageImage, setModelPageImage] = useState<ModelPageImagePreview | null>(
-    null,
-  )
-  const modelPageImagesRef = useRef<Map<number, ModelPageImagePreview>>(new Map())
   const [extraction, setExtraction] = useState<PdfExtractionResult | null>(null)
   const [review, setReview] = useState<ReviewDocData | null>(null)
   const [note, setNote] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [restoring, setRestoring] = useState(true)
+  const [loadedDocId, setLoadedDocId] = useState<string | null>(null)
 
-  const abortRef = useRef<AbortController | null>(null)
+  const previewUrlRef = useRef<string | null>(null)
+  const unsubRef = useRef<(() => void) | null>(null)
   const { width: rightPanelWidth, setWidth: setRightPanelWidth, startResize } =
     usePersistedPanelWidth()
   const {
@@ -114,7 +126,22 @@ export default function OcrReviewPage() {
     maxWidth: 900,
   })
 
-  // 探测 Ollama 服务与已安装模型
+  const revokePreview = () => {
+    if (previewUrlRef.current?.startsWith('blob:')) {
+      URL.revokeObjectURL(previewUrlRef.current)
+    }
+    previewUrlRef.current = null
+    setPreviewUrl(null)
+  }
+
+  const setPreview = (url: string | null) => {
+    if (previewUrlRef.current?.startsWith('blob:') && previewUrlRef.current !== url) {
+      URL.revokeObjectURL(previewUrlRef.current)
+    }
+    previewUrlRef.current = url
+    setPreviewUrl(url)
+  }
+
   useEffect(() => {
     let cancelled = false
     const refresh = () => {
@@ -132,16 +159,213 @@ export default function OcrReviewPage() {
     }
   }, [])
 
-  // 切换版式时载入该版式的提示词配置
   useEffect(() => {
     setLlmConfig(loadLlmConfig(template))
   }, [template])
 
+  // 卸载时只断开 SSE，不取消后台任务
   useEffect(() => {
     return () => {
-      abortRef.current?.abort()
+      unsubRef.current?.()
+      unsubRef.current = null
+      if (previewUrlRef.current?.startsWith('blob:')) {
+        URL.revokeObjectURL(previewUrlRef.current)
+      }
     }
   }, [])
+
+  const applyJobSnapshot = useCallback((next: LlmJob) => {
+    setJob(next)
+    setStoredActiveJobId(next.id)
+    if (next.current?.streamLabel) {
+      setLlmStream({
+        label: next.current.streamLabel,
+        text: next.current.streamText || '',
+      })
+    }
+    if (!isJobActive(next.status)) {
+      setLlmStream((prev) =>
+        prev
+          ? {
+              label:
+                next.status === 'completed'
+                  ? '批量抽取已完成'
+                  : next.status === 'cancelled'
+                    ? '任务已中断'
+                    : '任务已结束',
+              text: prev.text,
+            }
+          : prev,
+      )
+    }
+  }, [])
+
+  const subscribeJob = useCallback(
+    (jobId: string) => {
+      unsubRef.current?.()
+      unsubRef.current = subscribeLlmJobEvents(
+        jobId,
+        (event, data) => {
+          if (event === 'snapshot') {
+            applyJobSnapshot(data as LlmJob)
+            return
+          }
+          if (event === 'stream') {
+            const current = data as LlmJob['current']
+            if (current) {
+              setLlmStream({
+                label: current.streamLabel,
+                text: current.streamText,
+              })
+              setJob((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      current,
+                      documents: prev.documents.map((doc) =>
+                        doc.id === current.docId
+                          ? {
+                              ...doc,
+                              status: 'running',
+                              progress: {
+                                done: current.pageIndex,
+                                total: current.totalPages,
+                              },
+                            }
+                          : doc,
+                      ),
+                    }
+                  : prev,
+              )
+            }
+            return
+          }
+          if (event === 'page_done') {
+            const payload = data as {
+              docId: string
+              outcome: JobPageOutcome
+              done: number
+              total: number
+            }
+            setJob((prev) => {
+              if (!prev) return prev
+              return {
+                ...prev,
+                documents: prev.documents.map((doc) =>
+                  doc.id === payload.docId
+                    ? {
+                        ...doc,
+                        status: 'running',
+                        progress: { done: payload.done, total: payload.total },
+                        pageOutcomes: [...doc.pageOutcomes, payload.outcome],
+                      }
+                    : doc,
+                ),
+              }
+            })
+            return
+          }
+          if (event === 'doc_started' || event === 'doc_done' || event === 'doc_error') {
+            void fetchLlmJob(jobId).then(applyJobSnapshot).catch(() => undefined)
+            return
+          }
+          if (event === 'job_status') {
+            void fetchLlmJob(jobId).then(applyJobSnapshot).catch(() => undefined)
+          }
+        },
+        () => {
+          // SSE 短暂断开时用轮询兜底；不取消任务
+          void fetchLlmJob(jobId)
+            .then(applyJobSnapshot)
+            .catch(() => undefined)
+        },
+      )
+    },
+    [applyJobSnapshot],
+  )
+
+  // 刷新后恢复未完成/可继续查看的任务
+  useEffect(() => {
+    let cancelled = false
+    const restore = async () => {
+      const jobId = getStoredActiveJobId()
+      if (!jobId) {
+        setRestoring(false)
+        return
+      }
+      try {
+        const existing = await fetchLlmJob(jobId)
+        if (cancelled) return
+        applyJobSnapshot(existing)
+        if (isJobActive(existing.status)) {
+          subscribeJob(existing.id)
+        }
+        const firstDone =
+          existing.documents.find((d) => d.status === 'done') ??
+          existing.documents[0] ??
+          null
+        if (firstDone) {
+          setSelectedDocId(firstDone.id)
+          setPreview(jobDocumentFileUrl(existing.id, firstDone.id))
+        }
+      } catch {
+        if (!cancelled) setStoredActiveJobId(null)
+      } finally {
+        if (!cancelled) setRestoring(false)
+      }
+    }
+    void restore()
+    return () => {
+      cancelled = true
+    }
+  }, [applyJobSnapshot, subscribeJob])
+
+  const loadDocResult = useCallback(
+    async (activeJob: LlmJob, doc: JobDocument) => {
+      if (doc.status !== 'done') {
+        setExtraction(null)
+        setReview(null)
+        setLoadedDocId(null)
+        setNote(doc.note || '')
+        return
+      }
+      try {
+        const result = await fetchJobDocumentResult(activeJob.id, doc.id)
+        const pageOutcomes = toPageOutcomes(result.pageOutcomes)
+        const extractionResult: PdfExtractionResult = {
+          structureType: result.structureType as TargetStructureType,
+          invoices: result.invoices,
+          pageOutcomes,
+        }
+        const reviewTemplate = getLabelTemplate(activeJob.templateId)
+        setExtraction(extractionResult)
+        setReview(extractionToReviewData(extractionResult, reviewTemplate))
+        setLoadedDocId(doc.id)
+        setNote(doc.note || '')
+        setTemplateId(activeJob.templateId)
+        setError(null)
+        setStep('review')
+      } catch (err) {
+        setError(err instanceof Error ? err.message : '加载识别结果失败')
+      }
+    },
+    [],
+  )
+
+  const handleSelectDoc = async (docId: string) => {
+    setSelectedDocId(docId)
+    if (job) {
+      const doc = job.documents.find((d) => d.id === docId)
+      if (!doc) return
+      setPreview(jobDocumentFileUrl(job.id, doc.id))
+      await loadDocResult(job, doc)
+      return
+    }
+    const index = files.findIndex((_, i) => `local-${i}-${files[i].name}` === docId)
+    if (index >= 0) {
+      setPreview(URL.createObjectURL(files[index]))
+    }
+  }
 
   const handleConfigChange = (patch: Partial<LlmExtractionConfig>) => {
     setLlmConfig((prev) => {
@@ -156,53 +380,52 @@ export default function OcrReviewPage() {
     setLlmConfig(buildDefaultLlmConfig(template))
   }
 
-  const clearModelPageImages = () => {
-    modelPageImagesRef.current.clear()
-    setModelPageImage(null)
-  }
-
-  const handleDownloadModelPageImage = (pageIndex?: number) => {
-    if (!file) return
-    const image =
-      pageIndex === undefined
-        ? modelPageImage
-        : modelPageImagesRef.current.get(pageIndex) ?? null
-    if (!image) return
-    downloadModelPageImage(image, file.name)
-  }
-
-  const handleFileSelect = (selected: File) => {
-    if (previewUrl?.startsWith('blob:')) URL.revokeObjectURL(previewUrl)
-    setFile(selected)
-    setPreviewUrl(URL.createObjectURL(selected))
+  const handleFilesSelect = (selected: File[]) => {
+    if (job && isJobActive(job.status)) {
+      setError('当前任务仍在运行。请先中断，或等任务结束后再新建。')
+      return
+    }
+    // 新建本地选择会离开旧任务视图
+    unsubRef.current?.()
+    unsubRef.current = null
+    setJob(null)
+    setStoredActiveJobId(null)
+    setFiles(selected)
+    setSelectedDocId(selected[0] ? `local-0-${selected[0].name}` : null)
+    setPreview(selected[0] ? URL.createObjectURL(selected[0]) : null)
     setExtraction(null)
     setReview(null)
-    setPageOutcomes([])
+    setLoadedDocId(null)
     setLlmStream(null)
-    clearModelPageImages()
     setNote('')
     setError(null)
     setStep('upload')
   }
 
   const handleReset = () => {
-    abortRef.current?.abort()
-    if (previewUrl?.startsWith('blob:')) URL.revokeObjectURL(previewUrl)
-    setFile(null)
-    setPreviewUrl(null)
+    if (job && isJobActive(job.status)) {
+      if (!window.confirm('当前任务仍在后台运行。清空仅离开界面，不会中断任务。确定？')) {
+        return
+      }
+    }
+    unsubRef.current?.()
+    unsubRef.current = null
+    revokePreview()
+    setFiles([])
+    setSelectedDocId(null)
+    setJob(null)
+    setStoredActiveJobId(null)
     setExtraction(null)
     setReview(null)
-    setPageOutcomes([])
+    setLoadedDocId(null)
     setLlmStream(null)
-    clearModelPageImages()
     setNote('')
     setError(null)
-    setPhase('idle')
     setStep('upload')
   }
 
   const handleRun = async () => {
-    if (!file || phase !== 'idle') return
+    if (files.length === 0 || (job && isJobActive(job.status))) return
 
     const { error: requestError } = parseRequestJson(llmConfig.requestJson)
     if (requestError) {
@@ -211,69 +434,62 @@ export default function OcrReviewPage() {
     }
 
     setError(null)
-    setPageOutcomes([])
     setExtraction(null)
-    clearModelPageImages()
-    setLlmStream({ label: '准备连接大模型…', text: '' })
-    setPhase('extract')
-    setProgress({ done: 0, total: 0 })
-
-    const controller = new AbortController()
-    abortRef.current = controller
+    setReview(null)
+    setLlmStream({ label: '上传文件并创建后台任务…', text: '' })
 
     try {
-      const result = await extractPdfFileWithLlm({
-        file,
+      const created = await createLlmJob({
+        files,
+        templateId,
         requestJson: llmConfig.requestJson,
-        template,
-        signal: controller.signal,
-        onPageDone: (outcome, done, total) => {
-          setPageOutcomes((prev) => [...prev, outcome])
-          setProgress({ done, total })
-        },
-        onStreamUpdate: (event) => {
-          setLlmStream({
-            label: `逐页抽取 · PDF 第 ${event.pageIndex + 1}/${event.totalPages} 页`,
-            text: event.text,
-          })
-        },
-        onPageImagePrepared: (image) => {
-          modelPageImagesRef.current.set(image.pageIndex, image)
-          setModelPageImage(image)
-        },
+        headerFields: template.headerFields,
+        sublistColumns: template.sublistColumns,
+        requiredSublistKeys: template.requiredSublistKeys ?? [],
+        llmModel,
       })
-
-      setExtraction(result)
-      if (result.invoices.length === 0) {
-        setReview(null)
-        const errors = result.pageOutcomes.filter((o) => o.status === 'error')
-        if (errors.length > 0) {
-          setError(
-            `未抽取到目标字段：${errors.length} 页请求失败，首个错误：${errors[0].error ?? '未知错误'}。` +
-              '请检查「大模型请求配置」中的 model 是否与 ollama list 一致',
-          )
-        } else {
-          setError('模型将所有页都判定为不含目标字段，请检查提示词或版式。')
-        }
-        return
+      applyJobSnapshot(created)
+      setFiles([])
+      const first = created.documents[0]
+      if (first) {
+        setSelectedDocId(first.id)
+        setPreview(jobDocumentFileUrl(created.id, first.id))
       }
-      setReview(extractionToReviewData(result, template))
-      setStep('review')
+      subscribeJob(created.id)
     } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') {
-        setError('已中断抽取')
-      } else {
-        setError(err instanceof Error ? err.message : '抽取失败，请重试')
-      }
-    } finally {
-      setPhase('idle')
-      abortRef.current = null
+      setLlmStream(null)
+      setError(err instanceof Error ? err.message : '创建识别任务失败')
     }
   }
 
-  const handleAbort = () => {
-    abortRef.current?.abort()
+  const handleAbort = async () => {
+    if (!job) return
+    try {
+      const cancelled = await cancelLlmJob(job.id)
+      applyJobSnapshot(cancelled)
+      setError('已请求中断；当前页推理结束后任务会停止')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '中断失败')
+    }
   }
+
+  const handleExportBatch = async () => {
+    if (!job) return
+    try {
+      await downloadJobExportZip(job.id)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '导出 ZIP 失败')
+    }
+  }
+
+  // 任务中某文档完成且当前选中它时，自动载入审核
+  useEffect(() => {
+    if (!job || !selectedDocId) return
+    const doc = job.documents.find((d) => d.id === selectedDocId)
+    if (!doc || doc.status !== 'done') return
+    if (loadedDocId === doc.id) return
+    void loadDocResult(job, doc)
+  }, [job, selectedDocId, loadedDocId, loadDocResult])
 
   const patchReview = (patch: Partial<ReviewDocData>) => {
     setReview((prev) => (prev ? { ...prev, ...patch } : prev))
@@ -472,14 +688,28 @@ export default function OcrReviewPage() {
     )
   }
 
-  const handleExport = () => {
-    if (!review || !file) return
+  const selectedJobDoc = job?.documents.find((d) => d.id === selectedDocId) ?? null
+  const selectedFileName =
+    selectedJobDoc?.fileName ??
+    (selectedDocId?.startsWith('local-')
+      ? files.find((_, i) => `local-${i}-${files[i].name}` === selectedDocId)?.name
+      : undefined)
+
+  const handleExport = async () => {
+    if (!review || !selectedFileName) return
+    const headerFields = job?.headerFields?.length
+      ? job.headerFields
+      : template.headerFields
+    const sublistColumns = job?.sublistColumns?.length
+      ? job.sublistColumns
+      : template.sublistColumns
+
     const payload = {
       ...buildDocumentExportPayload(
         {
-          id: 'llm-review',
-          fileName: file.name,
-          fileSize: file.size,
+          id: selectedDocId ?? 'llm-review',
+          fileName: selectedFileName,
+          fileSize: selectedJobDoc?.fileSize ?? 0,
           previewUrl: null,
           category: 'target',
           structureType: review.structureType,
@@ -490,12 +720,12 @@ export default function OcrReviewPage() {
           note,
           updatedAt: new Date().toISOString(),
         },
-        template.headerFields,
-        template.sublistColumns,
+        headerFields,
+        sublistColumns,
       ),
       extraction: {
-        engine: `ollama/${llmModel || '未设置'}`,
-        layoutTemplateId: templateId,
+        engine: `ollama/${job?.llmModel || llmModel || '未设置'}`,
+        layoutTemplateId: job?.templateId ?? templateId,
         totalPages: extraction?.pageOutcomes.length ?? 0,
         targetPages: pageNumbers(extraction?.pageOutcomes ?? [], 'target'),
         skippedPages: pageNumbers(extraction?.pageOutcomes ?? [], 'skipped'),
@@ -504,15 +734,27 @@ export default function OcrReviewPage() {
           .map((o) => ({ page: o.pageIndex + 1, error: o.error })),
       },
     }
-    downloadJson(payload, documentExportFileName(file.name))
+
+    if (job && selectedDocId) {
+      try {
+        await patchJobDocument(job.id, selectedDocId, {
+          note,
+          exportPayload: payload,
+        })
+      } catch {
+        // 本地导出仍继续
+      }
+    }
+
+    downloadJson(payload, documentExportFileName(selectedFileName))
   }
 
   const handleResizeKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
       if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
       event.preventDefault()
-      const step = event.shiftKey ? 40 : 16
-      const delta = event.key === 'ArrowLeft' ? step : -step
+      const stepPx = event.shiftKey ? 40 : 16
+      const delta = event.key === 'ArrowLeft' ? stepPx : -stepPx
       setRightPanelWidth((current) => Math.min(960, Math.max(320, current + delta)))
     },
     [setRightPanelWidth],
@@ -522,8 +764,8 @@ export default function OcrReviewPage() {
     (event: React.KeyboardEvent<HTMLDivElement>) => {
       if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
       event.preventDefault()
-      const step = event.shiftKey ? 40 : 16
-      const delta = event.key === 'ArrowLeft' ? step : -step
+      const stepPx = event.shiftKey ? 40 : 16
+      const delta = event.key === 'ArrowLeft' ? stepPx : -stepPx
       setUploadConfigWidth((current) =>
         Math.min(
           uploadConfigMaxWidth,
@@ -531,23 +773,19 @@ export default function OcrReviewPage() {
         ),
       )
     },
-    [
-      setUploadConfigWidth,
-      uploadConfigMaxWidth,
-      uploadConfigMinWidth,
-    ],
+    [setUploadConfigWidth, uploadConfigMaxWidth, uploadConfigMinWidth],
   )
 
-  const isRecognizing = phase !== 'idle'
+  const isRecognizing = Boolean(job && isJobActive(job.status))
+  const hasFiles = files.length > 0 || Boolean(job?.documents.length)
   const currentStepIndex =
-    step === 'upload' ? (isRecognizing ? 1 : file ? 1 : 0) : 2
+    step === 'upload' ? (isRecognizing ? 1 : hasFiles ? 1 : 0) : 2
 
   const skippedPages = pageNumbers(extraction?.pageOutcomes ?? [], 'skipped')
   const errorOutcomes = (extraction?.pageOutcomes ?? []).filter(
     (o) => o.status === 'error',
   )
 
-  // 请求的模型不在 Ollama 已安装列表时给出明确警告（不带 tag 时 Ollama 默认取 :latest）
   const modelMissing =
     llmReady &&
     llmModels.length > 0 &&
@@ -555,22 +793,35 @@ export default function OcrReviewPage() {
     !llmModels.includes(llmModel) &&
     !llmModels.includes(`${llmModel}:latest`)
 
+  const progressDone = job
+    ? job.documents.reduce((sum, doc) => sum + (doc.progress?.done ?? 0), 0)
+    : 0
+  const progressTotal = job
+    ? job.documents.reduce((sum, doc) => sum + (doc.progress?.total ?? 0), 0)
+    : 0
+  const docsDone = job?.documents.filter((d) => d.status === 'done').length ?? 0
+  const docsTotal = job?.documents.length ?? 0
+
   return (
     <div className="ocr-review-page">
       <header className="page-header">
         <div className="brand">
           <h1>智能预识别审核</h1>
           <p>
-            上传 PDF → Qwen3-VL 逐页抽取（每页 1 次请求）→ 按版式审核修正 → 导出 JSON
+            批量上传 PDF → 服务端排队抽取（关闭页面不中断）→ 审核修正 → 导出 JSON / ZIP
             <span className="engine-tag">
-              引擎: ollama/{llmModel || '未设置'}
+              引擎: ollama/{job?.llmModel || llmModel || '未设置'}
               {llmReady ? '' : '（未连接）'}
             </span>
           </p>
         </div>
         {step === 'review' && (
-          <button type="button" className="btn btn-outline" onClick={handleReset}>
-            重新上传
+          <button
+            type="button"
+            className="btn btn-outline"
+            onClick={() => setStep('upload')}
+          >
+            返回队列
           </button>
         )}
       </header>
@@ -588,6 +839,7 @@ export default function OcrReviewPage() {
       </nav>
 
       {error && <div className="error-banner">{error}</div>}
+      {restoring && <div className="toast-banner">正在恢复上次识别任务…</div>}
       {!llmReady && step === 'upload' && (
         <div className="toast-banner">
           未连接到 Ollama 服务。请确认 Qwen3-VL 已启动，且 Ollama 监听 0.0.0.0:11434
@@ -595,7 +847,7 @@ export default function OcrReviewPage() {
           ppocr-web 查看 Ollama 连通性检测。
         </div>
       )}
-      {modelMissing && step === 'upload' && (
+      {modelMissing && step === 'upload' && !job && (
         <div className="error-banner">
           请求配置中的模型「{llmModel}」不在 Ollama 已安装列表（已安装：
           {llmModels.join('、')}），请修改「大模型请求配置」中的 model 字段
@@ -613,16 +865,20 @@ export default function OcrReviewPage() {
         >
           <section className="llm-upload-preview-panel">
             <UploadPanel
-              file={file}
+              files={files}
+              jobDocuments={job?.documents}
+              selectedDocId={selectedDocId}
               previewUrl={previewUrl}
               isRecognizing={isRecognizing}
               ocrReady={llmReady}
               llmStream={llmStream}
-              modelPageImage={modelPageImage}
-              onDownloadModelPageImage={() => handleDownloadModelPageImage()}
-              onFileSelect={handleFileSelect}
+              job={job}
+              onFilesSelect={handleFilesSelect}
+              onSelectDoc={(id) => void handleSelectDoc(id)}
               onRunOcr={() => void handleRun()}
               onReset={handleReset}
+              onCancelJob={() => void handleAbort()}
+              onExportBatch={() => void handleExportBatch()}
             />
           </section>
 
@@ -653,7 +909,7 @@ export default function OcrReviewPage() {
                       type="radio"
                       name="llm-layout-template"
                       checked={templateId === item.id}
-                      disabled={isRecognizing}
+                      disabled={isRecognizing || Boolean(job)}
                       onChange={() => setTemplateId(item.id)}
                     />
                     <span className="option-title">{item.name}</span>
@@ -671,43 +927,55 @@ export default function OcrReviewPage() {
               onReset={handleConfigReset}
             />
 
-            {isRecognizing && (
+            {(isRecognizing || (job && job.documents.some((d) => d.pageOutcomes.length))) && (
               <section className="llm-progress-card">
                 <div className="llm-progress-header">
                   <strong>
-                    {`正在逐页抽取… ${progress.done}/${progress.total || '?'}`}
+                    {isRecognizing
+                      ? `排队抽取中… 文件 ${docsDone}/${docsTotal}`
+                      : `任务 ${job?.status} · 文件 ${docsDone}/${docsTotal}`}
+                    {progressTotal > 0 ? ` · 页 ${progressDone}/${progressTotal}` : ''}
                   </strong>
-                  <button
-                    type="button"
-                    className="btn btn-ghost btn-sm"
-                    onClick={handleAbort}
-                  >
-                    中断
-                  </button>
+                  {isRecognizing && (
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => void handleAbort()}
+                    >
+                      中断
+                    </button>
+                  )}
                 </div>
-                {pageOutcomes.length > 0 && (
-                  <ul className="llm-progress-pages">
-                    {pageOutcomes.map((outcome) => (
-                      <li key={outcome.pageIndex} className={`llm-page-${outcome.status}`}>
-                        第 {outcome.pageIndex + 1} 页：
-                        {outcome.status === 'target'
-                          ? '已抽取'
-                          : outcome.status === 'skipped'
-                            ? '无目标字段，已跳过'
-                            : `失败（${outcome.error ?? '未知错误'}）`}
-                        {modelPageImagesRef.current.has(outcome.pageIndex) && (
-                          <button
-                            type="button"
-                            className="btn btn-ghost btn-sm llm-page-image-download"
-                            onClick={() => handleDownloadModelPageImage(outcome.pageIndex)}
+                {job?.documents.map((doc) => (
+                  <div key={doc.id} className="llm-batch-doc-progress">
+                    <div className="llm-batch-doc-progress-title">
+                      {doc.fileName}
+                      <span>
+                        {doc.status}
+                        {doc.progress.total > 0
+                          ? ` ${doc.progress.done}/${doc.progress.total}`
+                          : ''}
+                      </span>
+                    </div>
+                    {doc.pageOutcomes.length > 0 && (
+                      <ul className="llm-progress-pages">
+                        {doc.pageOutcomes.map((outcome) => (
+                          <li
+                            key={`${doc.id}-${outcome.pageIndex}`}
+                            className={`llm-page-${outcome.status}`}
                           >
-                            输入图
-                          </button>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                )}
+                            第 {outcome.pageIndex + 1} 页：
+                            {outcome.status === 'target'
+                              ? '已抽取'
+                              : outcome.status === 'skipped'
+                                ? '无目标字段，已跳过'
+                                : `失败（${outcome.error ?? '未知错误'}）`}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                ))}
               </section>
             )}
           </section>
@@ -724,7 +992,9 @@ export default function OcrReviewPage() {
           <section className="label-preview-panel">
             <div className="panel-title">
               <h2>PDF 预览</h2>
-              {file && <span>{(file.size / 1024).toFixed(1)} KB</span>}
+              {selectedJobDoc && (
+                <span>{(selectedJobDoc.fileSize / 1024).toFixed(1)} KB</span>
+              )}
             </div>
             <div className="label-preview-scroll">
               {previewUrl ? (
@@ -753,8 +1023,8 @@ export default function OcrReviewPage() {
               <div className="label-annotation-panel">
                 <div className="label-annotation-header">
                   <h2>抽取结果审核</h2>
-                  <p className="label-current-file" title={file?.name}>
-                    {file?.name}
+                  <p className="label-current-file" title={selectedFileName}>
+                    {selectedFileName}
                   </p>
                 </div>
 
@@ -922,10 +1192,19 @@ export default function OcrReviewPage() {
                     <button
                       type="button"
                       className="btn btn-primary"
-                      onClick={handleExport}
+                      onClick={() => void handleExport()}
                     >
                       导出 JSON
                     </button>
+                    {job && docsDone > 0 && (
+                      <button
+                        type="button"
+                        className="btn btn-outline"
+                        onClick={() => void handleExportBatch()}
+                      >
+                        导出全部 ZIP
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>

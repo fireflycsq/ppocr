@@ -24,6 +24,10 @@ services:
       LABEL_DEFAULT_PASSWORD: ${LABEL_DEFAULT_PASSWORD:-admin123}
       LABEL_ALLOW_REGISTER: ${LABEL_ALLOW_REGISTER:-true}
       LABEL_EXAMPLE_MAX_MB: ${LABEL_EXAMPLE_MAX_MB:-25}
+      # 后台批量预识别直连 Ollama（与 frontend 的 LLM_UPSTREAM 保持一致）
+      OLLAMA_BASE: http://${LLM_UPSTREAM:-host.docker.internal:11434}
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
     healthcheck:
       test:
         [
