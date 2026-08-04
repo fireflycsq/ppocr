@@ -19,6 +19,10 @@ interface UploadPanelProps {
   job?: LlmJob | null
   onFilesSelect: (files: File[]) => void
   onSelectDoc: (docId: string) => void
+  /** 打开指定已完成文档的字段审核 */
+  onReviewDoc?: (docId: string) => void
+  /** 从队列进入批量审核（默认第一个已完成文档） */
+  onEnterBatchReview?: () => void
   onRunOcr: () => void
   onReset: () => void
   onCancelJob?: () => void
@@ -57,6 +61,8 @@ export function UploadPanel({
   job = null,
   onFilesSelect,
   onSelectDoc,
+  onReviewDoc,
+  onEnterBatchReview,
   onRunOcr,
   onReset,
   onCancelJob,
@@ -158,8 +164,9 @@ export function UploadPanel({
                 item.progress && item.progress.total > 0
                   ? `${item.progress.done}/${item.progress.total}`
                   : ''
+              const canReview = item.status === 'done'
               return (
-                <li key={item.id}>
+                <li key={item.id} className="llm-batch-file-row">
                   <button
                     type="button"
                     className={`llm-batch-file-item ${active ? 'active' : ''} ${item.status ? `status-${item.status}` : ''}`}
@@ -177,6 +184,15 @@ export function UploadPanel({
                       <span className="llm-batch-file-error">{item.error}</span>
                     )}
                   </button>
+                  {canReview && onReviewDoc && (
+                    <button
+                      type="button"
+                      className="btn btn-primary btn-sm llm-batch-review-btn"
+                      onClick={() => onReviewDoc(item.id)}
+                    >
+                      审核
+                    </button>
+                  )}
                 </li>
               )
             })}
@@ -199,18 +215,22 @@ export function UploadPanel({
                     : '等待 Ollama 连接…'}
               </button>
             )}
+            {job && doneCount > 0 && onEnterBatchReview && (
+              <button
+                type="button"
+                className="btn btn-primary btn-lg"
+                onClick={onEnterBatchReview}
+              >
+                进入批量审核（{doneCount}）
+              </button>
+            )}
             {job && isRecognizing && onCancelJob && (
               <button type="button" className="btn btn-outline" onClick={onCancelJob}>
                 中断任务
               </button>
             )}
             {job && doneCount > 0 && onExportBatch && (
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={onExportBatch}
-                disabled={isRecognizing && doneCount === 0}
-              >
+              <button type="button" className="btn btn-outline" onClick={onExportBatch}>
                 导出结果 ZIP（{doneCount}）
               </button>
             )}

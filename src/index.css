@@ -1066,6 +1066,13 @@ body {
   gap: 8px;
 }
 
+.page-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 .llm-batch-file-list {
   list-style: none;
   margin: 0 0 12px;
@@ -1075,6 +1082,22 @@ body {
   gap: 6px;
   max-height: 220px;
   overflow-y: auto;
+}
+
+.llm-batch-file-row {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.llm-batch-file-row .llm-batch-file-item {
+  flex: 1;
+  min-width: 0;
+}
+
+.llm-batch-review-btn {
+  flex-shrink: 0;
+  align-self: center;
 }
 
 .llm-batch-file-item {
@@ -1189,6 +1212,104 @@ body {
   grid-template-rows: minmax(0, 1fr);
   min-height: 0;
   overflow: hidden;
+}
+
+.llm-review-layout-batch {
+  grid-template-columns:
+    minmax(180px, 220px) minmax(180px, 1fr) 6px var(--label-right-panel-width, 440px);
+}
+
+.llm-review-doc-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  padding: 12px;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.llm-review-doc-sidebar-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.llm-review-doc-sidebar-head h3 {
+  margin: 0;
+  font-size: 0.9375rem;
+}
+
+.llm-review-doc-sidebar-head span {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.llm-review-doc-nav {
+  display: flex;
+  gap: 6px;
+}
+
+.llm-review-doc-nav .btn {
+  flex: 1;
+}
+
+.llm-review-doc-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.llm-review-doc-item {
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--border);
+  background: #fff;
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.llm-review-doc-item:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.llm-review-doc-item.active {
+  border-color: #2563eb;
+  background: #eff6ff;
+}
+
+.llm-review-doc-item.status-done {
+  border-color: #86efac;
+}
+
+.llm-review-doc-name {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llm-review-doc-status {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.llm-review-export-all {
+  width: 100%;
 }
 
 .llm-extract-summary {

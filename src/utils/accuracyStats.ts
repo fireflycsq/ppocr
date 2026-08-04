@@ -137,17 +137,186 @@ export function parseExportJson(text: string, sourceName: string): NormalizedDoc
 /** 金额类字段用数值比对（1,500.00 与 1500.00 视为一致） */
 const AMOUNT_FIELD_KEYS = new Set(['total', 'charges_in_hkd', 'total_hkd'])
 
+/** 重量/体积：数值一致即可（1.50 KG 与 1.5 KG / 1.5kg 视为一致） */
+const MEASURE_FIELD_KEYS = new Set(['weight', 'volume'])
+
+const MONTH_INDEX: Record<string, number> = {
+  jan: 1,
+  january: 1,
+  feb: 2,
+  february: 2,
+  mar: 3,
+  march: 3,
+  apr: 4,
+  april: 4,
+  may: 5,
+  jun: 6,
+  june: 6,
+  jul: 7,
+  july: 7,
+  aug: 8,
+  august: 8,
+  sep: 9,
+  sept: 9,
+  september: 9,
+  oct: 10,
+  october: 10,
+  nov: 11,
+  november: 11,
+  dec: 12,
+  december: 12,
+}
+
+/**
+ * 文本归一：
+ * - 压缩连续空白
+ * - 去掉斜杠两侧空白（A / B、A/ B、A /B 均视为 A/B）
+ * - 去首尾空白
+ */
 function normalizeText(value: string): string {
-  return value.replace(/\s+/g, ' ').trim()
+  return value
+    .replace(/\s+/g, ' ')
+    .replace(/\s*\/\s*/g, '/')
+    .trim()
+}
+
+function isMeasureField(key: string): boolean {
+  if (MEASURE_FIELD_KEYS.has(key)) return true
+  return /^(gross_|net_|chargeable_)?(weight|volume|wt|vol)(_|$)/i.test(key)
+}
+
+function isDateField(key: string): boolean {
+  return /date/i.test(key)
+}
+
+/** 解析「数值 + 可选单位」，如 1.50 KG、1.5kg、0.50CBM */
+function parseMeasuredValue(
+  value: string,
+): { num: number; unit: string } | null {
+  const trimmed = value.trim()
+  const match = trimmed.match(/^(-?[\d,]*\.?\d+)\s*(.*)$/)
+  if (!match) return null
+  const num = parseFloat(match[1].replace(/,/g, ''))
+  if (!Number.isFinite(num)) return null
+  const unit = match[2].replace(/\s+/g, '').toLowerCase()
+  return { num, unit }
+}
+
+function expandYear(year: number): number {
+  if (year >= 100) return year
+  // 发票场景：00–79 → 2000–2079，80–99 → 1980–1999
+  return year < 80 ? 2000 + year : 1900 + year
+}
+
+function toIsoDate(year: number, month: number, day: number): string | null {
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {
+    return null
+  }
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null
+  const dt = new Date(Date.UTC(year, month - 1, day))
+  if (
+    dt.getUTCFullYear() !== year ||
+    dt.getUTCMonth() !== month - 1 ||
+    dt.getUTCDate() !== day
+  ) {
+    return null
+  }
+  const mm = String(month).padStart(2, '0')
+  const dd = String(day).padStart(2, '0')
+  return `${year}-${mm}-${dd}`
+}
+
+function resolveMonthToken(token: string): number | null {
+  const key = token.trim().toLowerCase()
+  if (MONTH_INDEX[key] != null) return MONTH_INDEX[key]
+  const short = key.slice(0, 3)
+  return MONTH_INDEX[short] ?? null
+}
+
+/**
+ * 将常见发票日期解析为 YYYY-MM-DD。
+ * 支持：13 Nov 2025、13-Nov-25、2025-11-13、13/11/2025、2025年11月13日、Nov 13, 2025 等。
+ * 纯数字日期默认按日/月/年（航运单证常见）；若第一段>12 则必然是日在前。
+ */
+export function parseDateToIso(value: string): string | null {
+  const text = normalizeText(value)
+    .replace(/,/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!text) return null
+
+  // 2025年11月13日
+  let match = text.match(/^(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?$/i)
+  if (match) {
+    return toIsoDate(Number(match[1]), Number(match[2]), Number(match[3]))
+  }
+
+  // 2025-11-13 / 2025/11/13 / 2025.11.13
+  match = text.match(/^(\d{4})[/\-.](\d{1,2})[/\-.](\d{1,2})$/)
+  if (match) {
+    return toIsoDate(Number(match[1]), Number(match[2]), Number(match[3]))
+  }
+
+  // 13 Nov 2025 / 13-Nov-25 / 13/Nov/2025
+  match = text.match(/^(\d{1,2})[/\-. ]([A-Za-z]{3,9})[/\-. ](\d{2,4})$/)
+  if (match) {
+    const month = resolveMonthToken(match[2])
+    if (month == null) return null
+    return toIsoDate(expandYear(Number(match[3])), month, Number(match[1]))
+  }
+
+  // Nov 13, 2025 / November 13 2025
+  match = text.match(/^([A-Za-z]{3,9})[/\-. ](\d{1,2})[/\-. ](\d{2,4})$/)
+  if (match) {
+    const month = resolveMonthToken(match[1])
+    if (month == null) return null
+    return toIsoDate(expandYear(Number(match[3])), month, Number(match[2]))
+  }
+
+  // 13/11/2025、13-11-25、13.11.2025（默认日/月/年）
+  match = text.match(/^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})$/)
+  if (match) {
+    let day = Number(match[1])
+    let month = Number(match[2])
+    const year = expandYear(Number(match[3]))
+    // 01/13/2025 这类：第二段>12，按月/日/年理解
+    if (month > 12 && day <= 12) {
+      const swappedDay = month
+      month = day
+      day = swappedDay
+    }
+    return toIsoDate(year, month, day)
+  }
+
+  return null
 }
 
 export function fieldValuesEqual(key: string, answer: string, actual: string): boolean {
   const a = normalizeText(answer)
   const b = normalizeText(actual)
+  // 大小写不敏感 + 空白/斜杠空格归一后全等
   if (a.toLowerCase() === b.toLowerCase()) return true
-  if (AMOUNT_FIELD_KEYS.has(key) && a && b) {
+  if (!a || !b) return false
+
+  if (AMOUNT_FIELD_KEYS.has(key)) {
     return amountsMatch(parseAmount(a), parseAmount(b))
   }
+
+  if (isMeasureField(key)) {
+    const ma = parseMeasuredValue(a)
+    const mb = parseMeasuredValue(b)
+    if (!ma || !mb || !amountsMatch(ma.num, mb.num)) return false
+    // 两侧都有单位时要求单位一致（忽略大小写与空格）；一侧无单位则只比数值
+    if (ma.unit && mb.unit && ma.unit !== mb.unit) return false
+    return true
+  }
+
+  if (isDateField(key)) {
+    const da = parseDateToIso(a)
+    const db = parseDateToIso(b)
+    if (da && db && da === db) return true
+  }
+
   return false
 }
 

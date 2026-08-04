@@ -29,6 +29,38 @@ try {
       assert.equal(fieldValuesEqual('invoice_no', ' 9-522-83357 ', '9-522-83357'), true)
       assert.equal(fieldValuesEqual('invoice_no', '123', '124'), false)
 
+      // 大小写不敏感
+      assert.equal(fieldValuesEqual('terms', 'FOB - Free On Board', 'fob - free on board'), true)
+      assert.equal(
+        fieldValuesEqual('description', 'Telex Release/Express Charges', 'telex release/express charges'),
+        true,
+      )
+
+      // 斜杠两侧空格差异视为相等
+      assert.equal(
+        fieldValuesEqual('description', 'Telex Release/Express Charges', 'Telex Release / Express Charges'),
+        true,
+      )
+      assert.equal(
+        fieldValuesEqual('description', 'A/B', 'A /B'),
+        true,
+      )
+
+      // 重量/体积：小数末尾 0、单位大小写/空格差异视为相等
+      assert.equal(fieldValuesEqual('weight', '10.50 KG', '10.5 KG'), true)
+      assert.equal(fieldValuesEqual('weight', '10.50 KG', '10.5kg'), true)
+      assert.equal(fieldValuesEqual('volume', '1.50 CBM', '1.5 CBM'), true)
+      assert.equal(fieldValuesEqual('volume', '1.50CBM', '1.5 CBM'), true)
+      assert.equal(fieldValuesEqual('weight', '10.5 KG', '10.6 KG'), false)
+      assert.equal(fieldValuesEqual('weight', '10.5 KG', '10.5 LB'), false)
+
+      // 日期：不同格式但同一天视为相等
+      assert.equal(fieldValuesEqual('invoice_date', '13 Nov 2025', '2025-11-13'), true)
+      assert.equal(fieldValuesEqual('invoice_date', '13-Nov-25', '13/11/2025'), true)
+      assert.equal(fieldValuesEqual('invoice_date', '18-Feb-25', '2025年2月18日'), true)
+      assert.equal(fieldValuesEqual('invoice_date', 'Nov 13, 2025', '13 November 2025'), true)
+      assert.equal(fieldValuesEqual('invoice_date', '13 Nov 2025', '14 Nov 2025'), false)
+
       // 单文档导出（发票+子清单）
       const answerJson = JSON.stringify({
         fileName: 'fedex-a.pdf',

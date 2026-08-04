@@ -60,7 +60,7 @@ export interface LlmJob {
 }
 
 export interface JobDocumentResult {
-  exportPayload: Record<string, unknown>
+  exportPayload?: Record<string, unknown>
   structureType: string
   invoices: Array<{
     header: Record<string, string>

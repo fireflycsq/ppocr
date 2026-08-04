@@ -54,7 +54,10 @@ import {
   saveLlmConfig,
 } from '../utils/llmConfig'
 import type { PageOutcome, PdfExtractionResult, ReviewDocData } from '../utils/llmExtraction'
-import { extractionToReviewData } from '../utils/llmExtraction'
+import {
+  extractionToReviewData,
+  reviewDataFromExportPayload,
+} from '../utils/llmExtraction'
 
 const WORKFLOW_STEPS = [
   { key: 'upload', label: '上传 PDF' },
@@ -321,13 +324,17 @@ export default function OcrReviewPage() {
   }, [applyJobSnapshot, subscribeJob])
 
   const loadDocResult = useCallback(
-    async (activeJob: LlmJob, doc: JobDocument) => {
+    async (
+      activeJob: LlmJob,
+      doc: JobDocument,
+      options?: { enterReview?: boolean },
+    ) => {
       if (doc.status !== 'done') {
         setExtraction(null)
         setReview(null)
         setLoadedDocId(null)
         setNote(doc.note || '')
-        return
+        return false
       }
       try {
         const result = await fetchJobDocumentResult(activeJob.id, doc.id)
@@ -338,27 +345,40 @@ export default function OcrReviewPage() {
           pageOutcomes,
         }
         const reviewTemplate = getLabelTemplate(activeJob.templateId)
+        const savedReview = result.exportPayload
+          ? reviewDataFromExportPayload(result.exportPayload, reviewTemplate)
+          : null
         setExtraction(extractionResult)
-        setReview(extractionToReviewData(extractionResult, reviewTemplate))
+        setReview(savedReview ?? extractionToReviewData(extractionResult, reviewTemplate))
         setLoadedDocId(doc.id)
-        setNote(doc.note || '')
+        setNote(
+          (typeof result.exportPayload?.note === 'string'
+            ? result.exportPayload.note
+            : null) ||
+            doc.note ||
+            '',
+        )
         setTemplateId(activeJob.templateId)
         setError(null)
-        setStep('review')
+        if (options?.enterReview !== false) {
+          setStep('review')
+        }
+        return true
       } catch (err) {
         setError(err instanceof Error ? err.message : '加载识别结果失败')
+        return false
       }
     },
     [],
   )
 
+  /** 队列中仅预览，不自动跳进审核页 */
   const handleSelectDoc = async (docId: string) => {
     setSelectedDocId(docId)
     if (job) {
       const doc = job.documents.find((d) => d.id === docId)
       if (!doc) return
       setPreview(jobDocumentFileUrl(job.id, doc.id))
-      await loadDocResult(job, doc)
       return
     }
     const index = files.findIndex((_, i) => `local-${i}-${files[i].name}` === docId)
@@ -484,14 +504,140 @@ export default function OcrReviewPage() {
     }
   }
 
-  // 任务中某文档完成且当前选中它时，自动载入审核
+  const doneDocuments = useMemo(
+    () => job?.documents.filter((doc) => doc.status === 'done') ?? [],
+    [job],
+  )
+
+  const selectedJobDoc = job?.documents.find((d) => d.id === selectedDocId) ?? null
+  const selectedFileName =
+    selectedJobDoc?.fileName ??
+    (selectedDocId?.startsWith('local-')
+      ? files.find((_, i) => `local-${i}-${files[i].name}` === selectedDocId)?.name
+      : undefined)
+
+  const buildCurrentExportPayload = useCallback(() => {
+    if (!review || !selectedFileName) return null
+    const headerFields = job?.headerFields?.length
+      ? job.headerFields
+      : template.headerFields
+    const sublistColumns = job?.sublistColumns?.length
+      ? job.sublistColumns
+      : template.sublistColumns
+    return {
+      ...buildDocumentExportPayload(
+        {
+          id: selectedDocId ?? 'llm-review',
+          fileName: selectedFileName,
+          fileSize: selectedJobDoc?.fileSize ?? 0,
+          previewUrl: null,
+          category: 'target',
+          structureType: review.structureType,
+          fieldValues: review.fieldValues,
+          invoiceEntries: review.invoiceEntries,
+          invoiceHeader: review.invoiceHeader,
+          sublistRows: review.sublistRows,
+          note,
+          updatedAt: new Date().toISOString(),
+        },
+        headerFields,
+        sublistColumns,
+      ),
+      extraction: {
+        engine: `ollama/${job?.llmModel || llmModel || '未设置'}`,
+        layoutTemplateId: job?.templateId ?? templateId,
+        totalPages: extraction?.pageOutcomes.length ?? 0,
+        targetPages: pageNumbers(extraction?.pageOutcomes ?? [], 'target'),
+        skippedPages: pageNumbers(extraction?.pageOutcomes ?? [], 'skipped'),
+        errorPages: (extraction?.pageOutcomes ?? [])
+          .filter((o) => o.status === 'error')
+          .map((o) => ({ page: o.pageIndex + 1, error: o.error })),
+      },
+    }
+  }, [
+    review,
+    selectedFileName,
+    job,
+    template.headerFields,
+    template.sublistColumns,
+    selectedDocId,
+    selectedJobDoc?.fileSize,
+    note,
+    llmModel,
+    templateId,
+    extraction,
+  ])
+
+  const saveCurrentReview = useCallback(async () => {
+    if (!job || !loadedDocId || !review) return
+    const payload = buildCurrentExportPayload()
+    if (!payload) return
+    try {
+      await patchJobDocument(job.id, loadedDocId, {
+        note,
+        exportPayload: payload,
+      })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '保存审核结果失败')
+    }
+  }, [job, loadedDocId, review, buildCurrentExportPayload, note])
+
+  /** 打开指定已完成文档的审核页（切换前先保存当前修改） */
+  const openReviewDoc = useCallback(
+    async (docId: string) => {
+      if (!job) return
+      const doc = job.documents.find((item) => item.id === docId)
+      if (!doc || doc.status !== 'done') {
+        setError('该文件尚未识别完成，暂不能审核')
+        return
+      }
+      if (loadedDocId && loadedDocId !== docId && review) {
+        await saveCurrentReview()
+      }
+      setSelectedDocId(docId)
+      setPreview(jobDocumentFileUrl(job.id, docId))
+      await loadDocResult(job, doc, { enterReview: true })
+    },
+    [job, loadedDocId, review, saveCurrentReview, loadDocResult],
+  )
+
+  const enterBatchReview = useCallback(async () => {
+    if (!job || doneDocuments.length === 0) return
+    const preferred =
+      doneDocuments.find((doc) => doc.id === selectedDocId) ?? doneDocuments[0]
+    await openReviewDoc(preferred.id)
+  }, [job, doneDocuments, selectedDocId, openReviewDoc])
+
+  const reviewDocIndex = doneDocuments.findIndex((doc) => doc.id === loadedDocId)
+  const canReviewPrev = reviewDocIndex > 0
+  const canReviewNext =
+    reviewDocIndex >= 0 && reviewDocIndex < doneDocuments.length - 1
+
+  const goReviewPrev = async () => {
+    if (!canReviewPrev) return
+    await openReviewDoc(doneDocuments[reviewDocIndex - 1].id)
+  }
+
+  const goReviewNext = async () => {
+    if (!canReviewNext) return
+    await openReviewDoc(doneDocuments[reviewDocIndex + 1].id)
+  }
+
+  const backToQueue = async () => {
+    if (review && loadedDocId) {
+      await saveCurrentReview()
+    }
+    setStep('upload')
+  }
+
+  // 已在审核页时，当前文档刚完成则自动载入；队列页不自动跳转
   useEffect(() => {
-    if (!job || !selectedDocId) return
-    const doc = job.documents.find((d) => d.id === selectedDocId)
+    if (step !== 'review' || !job || !selectedDocId) return
+    const doc = job.documents.find((item) => item.id === selectedDocId)
     if (!doc || doc.status !== 'done') return
     if (loadedDocId === doc.id) return
-    void loadDocResult(job, doc)
-  }, [job, selectedDocId, loadedDocId, loadDocResult])
+    void loadDocResult(job, doc, { enterReview: true })
+  }, [step, job, selectedDocId, loadedDocId, loadDocResult])
 
   const patchReview = (patch: Partial<ReviewDocData>) => {
     setReview((prev) => (prev ? { ...prev, ...patch } : prev))
@@ -690,52 +836,10 @@ export default function OcrReviewPage() {
     )
   }
 
-  const selectedJobDoc = job?.documents.find((d) => d.id === selectedDocId) ?? null
-  const selectedFileName =
-    selectedJobDoc?.fileName ??
-    (selectedDocId?.startsWith('local-')
-      ? files.find((_, i) => `local-${i}-${files[i].name}` === selectedDocId)?.name
-      : undefined)
-
   const handleExport = async () => {
     if (!review || !selectedFileName) return
-    const headerFields = job?.headerFields?.length
-      ? job.headerFields
-      : template.headerFields
-    const sublistColumns = job?.sublistColumns?.length
-      ? job.sublistColumns
-      : template.sublistColumns
-
-    const payload = {
-      ...buildDocumentExportPayload(
-        {
-          id: selectedDocId ?? 'llm-review',
-          fileName: selectedFileName,
-          fileSize: selectedJobDoc?.fileSize ?? 0,
-          previewUrl: null,
-          category: 'target',
-          structureType: review.structureType,
-          fieldValues: review.fieldValues,
-          invoiceEntries: review.invoiceEntries,
-          invoiceHeader: review.invoiceHeader,
-          sublistRows: review.sublistRows,
-          note,
-          updatedAt: new Date().toISOString(),
-        },
-        headerFields,
-        sublistColumns,
-      ),
-      extraction: {
-        engine: `ollama/${job?.llmModel || llmModel || '未设置'}`,
-        layoutTemplateId: job?.templateId ?? templateId,
-        totalPages: extraction?.pageOutcomes.length ?? 0,
-        targetPages: pageNumbers(extraction?.pageOutcomes ?? [], 'target'),
-        skippedPages: pageNumbers(extraction?.pageOutcomes ?? [], 'skipped'),
-        errorPages: (extraction?.pageOutcomes ?? [])
-          .filter((o) => o.status === 'error')
-          .map((o) => ({ page: o.pageIndex + 1, error: o.error })),
-      },
-    }
+    const payload = buildCurrentExportPayload()
+    if (!payload) return
 
     if (job && selectedDocId) {
       try {
@@ -817,15 +921,26 @@ export default function OcrReviewPage() {
             </span>
           </p>
         </div>
-        {step === 'review' && (
-          <button
-            type="button"
-            className="btn btn-outline"
-            onClick={() => setStep('upload')}
-          >
-            返回队列
-          </button>
-        )}
+        <div className="page-header-actions">
+          {step === 'review' && (
+            <button
+              type="button"
+              className="btn btn-outline"
+              onClick={() => void backToQueue()}
+            >
+              返回队列
+            </button>
+          )}
+          {step === 'upload' && doneDocuments.length > 0 && (
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => void enterBatchReview()}
+            >
+              继续批量审核（{doneDocuments.length}）
+            </button>
+          )}
+        </div>
       </header>
 
       <nav className="workflow-steps">
@@ -877,6 +992,8 @@ export default function OcrReviewPage() {
               job={job}
               onFilesSelect={handleFilesSelect}
               onSelectDoc={(id) => void handleSelectDoc(id)}
+              onReviewDoc={(id) => void openReviewDoc(id)}
+              onEnterBatchReview={() => void enterBatchReview()}
               onRunOcr={() => void handleRun()}
               onReset={handleReset}
               onCancelJob={() => void handleAbort()}
@@ -984,13 +1101,79 @@ export default function OcrReviewPage() {
         </main>
       ) : (
         <main
-          className="llm-review-layout"
+          className="llm-review-layout llm-review-layout-batch"
           style={
             {
               '--label-right-panel-width': `${rightPanelWidth}px`,
             } as React.CSSProperties
           }
         >
+          <aside className="llm-review-doc-sidebar">
+            <div className="llm-review-doc-sidebar-head">
+              <h3>批量审核</h3>
+              <span>
+                {Math.max(reviewDocIndex + 1, 0)}/{doneDocuments.length}
+              </span>
+            </div>
+            <div className="llm-review-doc-nav">
+              <button
+                type="button"
+                className="btn btn-outline btn-sm"
+                disabled={!canReviewPrev}
+                onClick={() => void goReviewPrev()}
+              >
+                上一份
+              </button>
+              <button
+                type="button"
+                className="btn btn-outline btn-sm"
+                disabled={!canReviewNext}
+                onClick={() => void goReviewNext()}
+              >
+                下一份
+              </button>
+            </div>
+            <ul className="llm-review-doc-list">
+              {(job?.documents ?? []).map((doc) => {
+                const active = doc.id === loadedDocId || doc.id === selectedDocId
+                const ready = doc.status === 'done'
+                return (
+                  <li key={doc.id}>
+                    <button
+                      type="button"
+                      className={`llm-review-doc-item ${active ? 'active' : ''} status-${doc.status}`}
+                      disabled={!ready}
+                      onClick={() => void openReviewDoc(doc.id)}
+                      title={ready ? doc.fileName : `${doc.fileName}（${doc.status}）`}
+                    >
+                      <span className="llm-review-doc-name">{doc.fileName}</span>
+                      <span className="llm-review-doc-status">
+                        {doc.status === 'done'
+                          ? '可审核'
+                          : doc.status === 'running'
+                            ? '识别中'
+                            : doc.status === 'queued'
+                              ? '排队中'
+                              : doc.status === 'error'
+                                ? '失败'
+                                : doc.status}
+                      </span>
+                    </button>
+                  </li>
+                )
+              })}
+            </ul>
+            {doneDocuments.length > 0 && (
+              <button
+                type="button"
+                className="btn btn-outline btn-sm llm-review-export-all"
+                onClick={() => void handleExportBatch()}
+              >
+                导出全部 ZIP
+              </button>
+            )}
+          </aside>
+
           <section className="label-preview-panel">
             <div className="panel-title">
               <h2>PDF 预览</h2>
@@ -1027,6 +1210,9 @@ export default function OcrReviewPage() {
                   <h2>抽取结果审核</h2>
                   <p className="label-current-file" title={selectedFileName}>
                     {selectedFileName}
+                    {doneDocuments.length > 1
+                      ? `（${reviewDocIndex + 1}/${doneDocuments.length}）`
+                      : ''}
                   </p>
                 </div>
 
@@ -1193,10 +1379,26 @@ export default function OcrReviewPage() {
                   <div className="label-annotation-buttons">
                     <button
                       type="button"
+                      className="btn btn-outline"
+                      disabled={!canReviewPrev}
+                      onClick={() => void goReviewPrev()}
+                    >
+                      上一份
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-outline"
+                      disabled={!canReviewNext}
+                      onClick={() => void goReviewNext()}
+                    >
+                      下一份
+                    </button>
+                    <button
+                      type="button"
                       className="btn btn-primary"
                       onClick={() => void handleExport()}
                     >
-                      导出 JSON
+                      导出当前 JSON
                     </button>
                     {job && docsDone > 0 && (
                       <button

@@ -333,3 +333,65 @@ export function extractionToReviewData(
     invoiceEntries,
   }
 }
+
+function coerceKeyRecord(value: unknown): Record<string, string> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return {}
+  const result: Record<string, string> = {}
+  for (const [key, item] of Object.entries(value)) {
+    if (typeof item === 'string') result[key] = item
+    else if (typeof item === 'number' || typeof item === 'boolean') result[key] = String(item)
+    else result[key] = ''
+  }
+  return result
+}
+
+/** 从已保存的导出 JSON 恢复审核数据（保留用户修改） */
+export function reviewDataFromExportPayload(
+  payload: Record<string, unknown>,
+  template: LabelLayoutTemplate,
+): ReviewDocData | null {
+  let invoices: AggregatedInvoice[] = []
+  let structureType = (payload.structureType as TargetStructureType) || 'single'
+
+  if (Array.isArray(payload.invoicesWithSublist)) {
+    invoices = payload.invoicesWithSublist.map((item) => {
+      const record =
+        typeof item === 'object' && item !== null && !Array.isArray(item)
+          ? (item as Record<string, unknown>)
+          : {}
+      return {
+        header: coerceKeyRecord(record.invoice),
+        sublist: Array.isArray(record.sublist)
+          ? record.sublist.map((row) => coerceKeyRecord(row))
+          : [],
+      }
+    })
+    structureType = 'multi_invoice_with_sublist'
+  } else if (payload.invoice !== undefined || payload.sublist !== undefined) {
+    invoices = [
+      {
+        header: coerceKeyRecord(payload.invoice),
+        sublist: Array.isArray(payload.sublist)
+          ? payload.sublist.map((row) => coerceKeyRecord(row))
+          : [],
+      },
+    ]
+    structureType = 'invoice_with_sublist'
+  } else if (Array.isArray(payload.invoices)) {
+    invoices = payload.invoices.map((item) => ({
+      header: coerceKeyRecord(item),
+      sublist: [],
+    }))
+    structureType = invoices.length > 1 ? 'multi_invoice' : 'single'
+  } else if (payload.fields !== undefined) {
+    invoices = [{ header: coerceKeyRecord(payload.fields), sublist: [] }]
+    structureType = 'single'
+  } else {
+    return null
+  }
+
+  return extractionToReviewData(
+    { structureType, invoices, pageOutcomes: [] },
+    template,
+  )
+}
