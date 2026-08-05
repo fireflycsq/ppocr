@@ -95,8 +95,14 @@ const AIR_WAYBILL_DHL_USER_PROMPT = `### 目标单证判定（is_target）
    - invoice_no：\`Invoice Number\` 标签右侧的编号；
    - invoice_date：\`Invoice Date\` 标签右侧的日期，保持原文格式。
 2. 明细 sublist（一个运单号对应一个明细块，一块输出一行，不合并、不遗漏）：
-   - air_waybill_number：\`Air Waybill Number\` 列中的运单号；
-   - total：该运单块 \`Total\` 列最下方的合计金额（该运单全部费用之和）；块内每条费用行（如 REGULATORY CHARGES、DUTY TAX PAID）也各有金额，严禁取单条费用行的金额或 \`Extra Charges Amount\` 列的数字；
+   - 分块：从某个 \`Air Waybill Number\` 开始，到下一个运单号出现之前（或本页表格结束）为一个独立运单块；
+   - air_waybill_number：该块 \`Air Waybill Number\` 列中的运单号；
+   - total：该运单块最右侧 \`Total\` 列中、块内最下方的那个金额（标准运费 + 全部附加费之后的最终合计）。
+     **严禁取以下数字作为 total**：
+     - 主行上的 \`Standard Charge\` / \`Standard Shipping Charge\`（常与 Total 列同值出现在块顶部，如 275.03）；
+     - \`Extra Charges Amount\` 列中的单条附加费（如 FUEL SURCHARGE、DEMAND SURCHARGE、GOGREEN PLUS、REGULATORY CHARGES、DUTY TAX PAID）；
+     - 块内任何中间行的金额。
+     正确做法：先定位该运单块的起止范围，再取 \`Total\` 列最底部的数字（如块内有 275.03 与 375.78 时，必须取 375.78）。
    - \`Service Sub Total\`、\`Total: HKD:\` 等小计/合计行不是运单明细，严禁输出；
    - 没有运单号的行直接丢弃，不要输出。
 
