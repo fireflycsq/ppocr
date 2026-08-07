@@ -14,6 +14,7 @@ import {
 import {
   AIR_WAYBILL_MERGE_TEMPLATE_IDS,
   bumpInvoiceNoCount,
+  estimateInvoiceNoCountsFromInvoices,
   mergeAirWaybillByMajorityInvoiceNo,
   normalizeInvoiceNo,
 } from './invoiceMerge'
@@ -67,6 +68,31 @@ function findInvoiceNoKey(template: LabelLayoutTemplate): string | null {
     /invoice.*(no|number)|发票号/i.test(`${field.key} ${field.label}`),
   )
   return match?.key ?? template.headerFields[0]?.key ?? null
+}
+
+/** FedEx/DHL：审核展示前强制多数表决合并，并固定为发票+子清单 */
+function ensureAirWaybillMerged(
+  result: PdfExtractionResult,
+  template: LabelLayoutTemplate,
+): PdfExtractionResult {
+  if (!AIR_WAYBILL_MERGE_TEMPLATE_IDS.has(template.id)) return result
+  const invoiceNoKey = findInvoiceNoKey(template)
+  if (!invoiceNoKey || result.invoices.length === 0) {
+    return { ...result, structureType: 'invoice_with_sublist' }
+  }
+  if (result.invoices.length === 1) {
+    return { ...result, structureType: 'invoice_with_sublist' }
+  }
+  const counts = estimateInvoiceNoCountsFromInvoices(result.invoices, invoiceNoKey)
+  return {
+    structureType: 'invoice_with_sublist',
+    invoices: mergeAirWaybillByMajorityInvoiceNo(
+      result.invoices,
+      invoiceNoKey,
+      counts,
+    ),
+    pageOutcomes: result.pageOutcomes,
+  }
 }
 
 function countFilledFields(record: Record<string, string>): number {
@@ -402,13 +428,14 @@ export function extractionToReviewData(
   result: PdfExtractionResult,
   template: LabelLayoutTemplate,
 ): ReviewDocData {
-  const first = result.invoices[0]
+  const merged = ensureAirWaybillMerged(result, template)
+  const first = merged.invoices[0]
   const firstHeader = first ? keyRecordToIdRecord(first.header, template.headerFields) : {}
   const firstSublist = first ? keyRowsToSublistRows(first.sublist, template) : []
 
   const invoiceEntries: InvoiceEntry[] =
-    result.invoices.length > 0
-      ? result.invoices.map((invoice) => {
+    merged.invoices.length > 0
+      ? merged.invoices.map((invoice) => {
           const rows = keyRowsToSublistRows(invoice.sublist, template)
           return {
             id: createInvoiceEntryId(),
@@ -419,7 +446,7 @@ export function extractionToReviewData(
       : [createEmptyInvoiceEntry(false)]
 
   return {
-    structureType: result.structureType,
+    structureType: merged.structureType,
     fieldValues: firstHeader,
     invoiceHeader: firstHeader,
     sublistRows: firstSublist.length > 0 ? firstSublist : [createEmptySublistRow()],

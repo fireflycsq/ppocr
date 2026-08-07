@@ -106,8 +106,28 @@ export function mergeAirWaybillByMajorityInvoiceNo<T extends MergeableInvoice>(
 export function bumpInvoiceNoCount(
   counts: Map<string, number>,
   invoiceNo: string,
+  weight = 1,
 ): void {
   const key = normalizeInvoiceNo(invoiceNo)
   if (!key) return
-  counts.set(key, (counts.get(key) ?? 0) + 1)
+  counts.set(key, (counts.get(key) ?? 0) + Math.max(1, weight))
+}
+
+/**
+ * 无跨页计次时（如加载已保存结果），用明细行数近似出现次数：
+ * 正确发票号通常已吸收更多页的明细，权重更高。
+ */
+export function estimateInvoiceNoCountsFromInvoices<T extends MergeableInvoice>(
+  invoices: T[],
+  invoiceNoKey: string,
+): Map<string, number> {
+  const counts = new Map<string, number>()
+  for (const invoice of invoices) {
+    bumpInvoiceNoCount(
+      counts,
+      invoice.header[invoiceNoKey] ?? '',
+      Math.max(1, invoice.sublist.length),
+    )
+  }
+  return counts
 }

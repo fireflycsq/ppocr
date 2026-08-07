@@ -417,6 +417,76 @@ def find_invoice_no_key(header_fields: Iterable[Dict[str, Any]]) -> Optional[str
     return str(fields[0].get("key") or "") or None
 
 
+# FedEx / DHL：跨页合并为「发票 + 子清单」
+AIR_WAYBILL_MERGE_TEMPLATE_IDS = {"air_waybill", "air_waybill_dhl"}
+
+
+def normalize_invoice_no(value: str) -> str:
+    return re.sub(r"\s+", "", value or "").upper()
+
+
+def pick_majority_invoice_no(counts: Dict[str, int]) -> Optional[str]:
+    best_key: Optional[str] = None
+    best_count = 0
+    for key, count in counts.items():
+        if not key:
+            continue
+        if count > best_count:
+            best_key = key
+            best_count = count
+    return best_key
+
+
+def merge_air_waybill_by_majority_invoice_no(
+    invoices: List[AggregatedInvoice],
+    invoice_no_key: str,
+    invoice_no_counts: Dict[str, int],
+) -> List[AggregatedInvoice]:
+    """子清单全部归到出现次数最多的发票号；其余发票号视为识别错误。"""
+    if not invoices:
+        return invoices
+
+    majority_key = pick_majority_invoice_no(invoice_no_counts)
+    if not majority_key:
+        for inv in invoices:
+            raw = (inv.header.get(invoice_no_key) or "").strip()
+            if raw:
+                majority_key = normalize_invoice_no(raw)
+                break
+
+    canonical: Optional[AggregatedInvoice] = None
+    if majority_key:
+        for inv in invoices:
+            if normalize_invoice_no(inv.header.get(invoice_no_key, "")) == majority_key:
+                canonical = inv
+                break
+    if canonical is None:
+        canonical = invoices[0]
+
+    canonical_no = canonical.header.get(invoice_no_key, "")
+    if normalize_invoice_no(canonical_no) != (majority_key or ""):
+        canonical_no = majority_key or canonical_no
+
+    result = AggregatedInvoice(
+        header=dict(canonical.header),
+        sublist=list(canonical.sublist),
+    )
+    if canonical_no:
+        result.header[invoice_no_key] = canonical_no
+
+    for inv in invoices:
+        if inv is canonical:
+            continue
+        for key, value in inv.header.items():
+            if key == invoice_no_key:
+                continue
+            if not result.header.get(key) and value:
+                result.header[key] = value
+        result.sublist.extend(inv.sublist)
+
+    return [result]
+
+
 def extract_pdf_with_llm(
     pdf_path: str,
     *,
@@ -424,6 +494,7 @@ def extract_pdf_with_llm(
     header_fields: List[Dict[str, Any]],
     sublist_columns: List[Dict[str, Any]],
     required_sublist_keys: Optional[List[str]] = None,
+    template_id: str = "",
     ollama_base: str,
     on_page_done: Optional[Callable[[PageOutcome, int, int], None]] = None,
     on_stream_update: Optional[
@@ -444,12 +515,14 @@ def extract_pdf_with_llm(
         return _has_values(row) and all(row.get(key) for key in required_keys)
 
     invoice_no_key = find_invoice_no_key(header_fields)
+    is_air_waybill_merge = template_id in AIR_WAYBILL_MERGE_TEMPLATE_IDS
     images = render_pdf_pages(pdf_path)
     total_pages = len(images)
 
     invoices: List[AggregatedInvoice] = []
     pending_orphans: List[Dict[str, str]] = []
     page_outcomes: List[PageOutcome] = []
+    invoice_no_counts: Dict[str, int] = {}
 
     for i, image in enumerate(images):
         if cancel_check and cancel_check():
@@ -512,20 +585,30 @@ def extract_pdf_with_llm(
                     for inv in page_invoices:
                         header = inv["header"]
                         sublist = inv["sublist"]
-                        invoice_no = header.get(invoice_no_key, "") if invoice_no_key else ""
-                        existing = (
-                            next(
+                        invoice_no = (
+                            header.get(invoice_no_key, "") if invoice_no_key else ""
+                        )
+                        if is_air_waybill_merge and invoice_no:
+                            key = normalize_invoice_no(invoice_no)
+                            if key:
+                                invoice_no_counts[key] = (
+                                    invoice_no_counts.get(key, 0) + 1
+                                )
+
+                        existing = None
+                        if invoice_no and invoice_no_key:
+                            normalized = normalize_invoice_no(invoice_no)
+                            existing = next(
                                 (
                                     item
                                     for item in invoices
-                                    if invoice_no_key
-                                    and item.header.get(invoice_no_key) == invoice_no
+                                    if normalize_invoice_no(
+                                        item.header.get(invoice_no_key, "")
+                                    )
+                                    == normalized
                                 ),
                                 None,
                             )
-                            if invoice_no
-                            else None
-                        )
                         if existing:
                             for key, value in header.items():
                                 if not existing.header.get(key) and value:
@@ -575,8 +658,16 @@ def extract_pdf_with_llm(
         else:
             invoices.append(AggregatedInvoice(header={}, sublist=pending_orphans))
 
-    has_sublist = any(inv.sublist for inv in invoices)
-    if len(invoices) > 1:
+    final_invoices = invoices
+    if is_air_waybill_merge and invoice_no_key:
+        final_invoices = merge_air_waybill_by_majority_invoice_no(
+            invoices, invoice_no_key, invoice_no_counts
+        )
+
+    has_sublist = any(inv.sublist for inv in final_invoices)
+    if is_air_waybill_merge:
+        structure_type = "invoice_with_sublist"
+    elif len(final_invoices) > 1:
         structure_type = (
             "multi_invoice_with_sublist" if has_sublist else "multi_invoice"
         )
@@ -585,7 +676,7 @@ def extract_pdf_with_llm(
 
     return PdfExtractionResult(
         structure_type=structure_type,
-        invoices=invoices,
+        invoices=final_invoices,
         page_outcomes=page_outcomes,
     )
 

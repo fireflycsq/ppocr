@@ -240,6 +240,7 @@ def _process_document(job: Dict[str, Any], doc: Dict[str, Any]) -> None:
         header_fields=job.get("headerFields") or [],
         sublist_columns=job.get("sublistColumns") or [],
         required_sublist_keys=job.get("requiredSublistKeys") or [],
+        template_id=job.get("templateId") or "",
         ollama_base=OLLAMA_BASE,
         on_page_done=on_page_done,
         on_stream_update=on_stream,

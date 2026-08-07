@@ -14,7 +14,10 @@ from llm_extract import (
     document_export_file_name,
     extract_json_text,
     loads_json_lenient,
+    merge_air_waybill_by_majority_invoice_no,
     normalize_extraction,
+    normalize_invoice_no,
+    pick_majority_invoice_no,
 )
 
 
@@ -88,6 +91,35 @@ class LlmExtractHelpersTest(unittest.TestCase):
         self.assertEqual(payload["sublist"][0]["air_waybill_number"], "AWB")
         self.assertEqual(payload["extraction"]["layoutTemplateId"], "air_waybill")
         self.assertEqual(document_export_file_name("A.pdf"), "A.json")
+
+    def test_normalize_invoice_no(self):
+        self.assertEqual(normalize_invoice_no(" hkgir 02836829 "), "HKGIR02836829")
+
+    def test_merge_air_waybill_by_majority_invoice_no(self):
+        counts = {"9-522-83357": 3, "9-522-8335Z": 1}
+        self.assertEqual(pick_majority_invoice_no(counts), "9-522-83357")
+        merged = merge_air_waybill_by_majority_invoice_no(
+            [
+                AggregatedInvoice(
+                    header={"invoice_no": "9-522-83357", "invoice_date": "13 Nov 2025"},
+                    sublist=[{"air_waybill_number": "111", "total": "10"}],
+                ),
+                AggregatedInvoice(
+                    header={"invoice_no": "9-522-8335Z", "invoice_date": ""},
+                    sublist=[{"air_waybill_number": "222", "total": "20"}],
+                ),
+                AggregatedInvoice(
+                    header={"invoice_no": "9-522-83357", "invoice_date": ""},
+                    sublist=[{"air_waybill_number": "333", "total": "30"}],
+                ),
+            ],
+            "invoice_no",
+            counts,
+        )
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].header["invoice_no"], "9-522-83357")
+        self.assertEqual(merged[0].header["invoice_date"], "13 Nov 2025")
+        self.assertEqual(len(merged[0].sublist), 3)
 
 
 if __name__ == "__main__":
