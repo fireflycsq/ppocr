@@ -51,10 +51,11 @@ const AIR_WAYBILL_USER_PROMPT = `### 目标单证判定（is_target）
    - invoice_date：\`Invoice Date 發票日期\` 标签右侧或下方的日期，保持原文格式。
 2. 明细 sublist（一个明细块输出一行，逐块抽取、不合并、不遗漏）：
    - 分块：以 \`Ship Date 寄件日期\` 开头、以 \`Total 合計\` 结尾的区域为一个独立明细块；
-   - air_waybill_number：该块内 \`Air Waybill Number 空運提單號\` 标签同一行右侧的编号，严禁取其他块或无关位置的编号；
+   - air_waybill_number：该块内必须先出现 \`Air Waybill Number 空運提單號\` 标签，再提取其同一行右侧的编号；
+     **严禁**把没有该标签的孤立数字串（如 Reference 联邦快递参考资料、Shipper Reference、页码、账号等）当作运单号；
+     块内找不到 \`Air Waybill Number 空運提單號\` 标签时，整块丢弃，不要输出；
    - total：该块内 \`Total 合計\` 标签同一行右侧的金额，必须是该块最终合计，严禁取 \`Other Charges 其它費用\`、\`Duty & Tax 稅項\`、\`Conversion Rate 兌換率\` 等其他数字；
-   - 页面底部的 \`Bill Shipper Subtotal\` 小计行不是明细块，严禁作为明细输出；
-   - 块内没有 air_waybill_number 的明细块直接丢弃，不要输出。
+   - 页面底部的 \`Bill Shipper Subtotal\` 小计行不是明细块，严禁作为明细输出。
 
 ### 数据清洗
 - total 只保留数字、小数点与负号，去掉 HKD、$、逗号与空格；
@@ -92,7 +93,7 @@ const AIR_WAYBILL_DHL_USER_PROMPT = `### 目标单证判定（is_target）
 
 ### 字段抽取（仅当 is_target=true 时执行）
 1. 发票头 header（页面上部的发票信息框）：
-   - invoice_no：\`Invoice Number\` 标签右侧的编号；
+   - invoice_no：\`Invoice Number\` 标签右侧的编号，必须是长度为 13 的字符串（如 HKGIR02836829）；长度不是 13 时仍按原文输出，不要擅自补全；
    - invoice_date：\`Invoice Date\` 标签右侧的日期，保持原文格式。
 2. 明细 sublist（一个运单号对应一个明细块，一块输出一行，不合并、不遗漏）：
    - 分块：从某个 \`Air Waybill Number\` 开始，到下一个运单号出现之前（或本页表格结束）为一个独立运单块；
@@ -108,7 +109,8 @@ const AIR_WAYBILL_DHL_USER_PROMPT = `### 目标单证判定（is_target）
 
 ### 数据清洗
 - total 只保留数字、小数点与负号，去掉货币符号、逗号与空格；
-- invoice_no、air_waybill_number 保持原文字符串，仅去除首尾空格；
+- invoice_no 保持原文字符串（预期长度 13），仅去除首尾空格；
+- air_waybill_number 保持原文字符串，仅去除首尾空格；
 - 某字段缺失时对应值填 null；本页没有有效明细时 sublist 输出 []；
 - 本页只有运单明细、发票头出现在之前页时：明细放入 orphan_sublist，invoices 输出 []。
 
@@ -118,7 +120,7 @@ const AIR_WAYBILL_DHL_USER_PROMPT = `### 目标单证判定（is_target）
   "is_target": true,
   "invoices": [
     {
-      "header": {"invoice_no": "12345678", "invoice_date": "01 Nov 2025"},
+      "header": {"invoice_no": "HKGIR02836829", "invoice_date": "01 Nov 2025"},
       "sublist": [
         {"air_waybill_number": "1234567890", "total": "1500.00"}
       ]
@@ -137,12 +139,14 @@ const FREIGHT_INVOICE_USER_PROMPT = `### 目标单证判定（is_target）
 
 出现以下任一情况判为非目标单证（is_target=false，invoices 与 orphan_sublist 均输出 []，不抽取任何字段）：
 - 纯付款通知/付款回执（Payment Advice）、对账单、封面页、合同条款、报关随附资料、空白页；
-- 页面只有地址、合计金额或说明文字，没有任何费用明细行。
+- 页面只有地址、合计金额或说明文字，没有任何费用明细行；
+- 页面左上方没有大写 \`INVOICE\` 字样及其后紧跟的 11 位发票编号；
+- 可抽取的有效字段（非空 header 字段）少于 5 个。
 
 ### 字段抽取（仅当 is_target=true 时执行）
 1. 发票头 header：
    - supplier：页面右上角的公司抬头名称（发票开具方）；
-   - invoice_no：页面左上方 \`INVOICE\` 字样右侧的发票编号；
+   - invoice_no：页面左上方大写 \`INVOICE\` 字样右侧紧跟的发票编号，必须是长度恰好为 11 的字符串（如 GHK01256555）；不是 11 位则本页判为非目标；
    - invoice_date：右侧网格表 \`INVOICE DATE\` 的日期，保持原文格式；
    - terms：网格表 \`TERMS\` 的付款条款（如 15 days from Inv. Date）；
    - incoterm：网格表 \`INCOTERM\` 的贸易条款（如 FOB - Free On Board）；
@@ -171,7 +175,7 @@ const FREIGHT_INVOICE_USER_PROMPT = `### 目标单证判定（is_target）
     {
       "header": {
         "supplier": "GEODIS Hong Kong Limited",
-        "invoice_no": "12345678",
+        "invoice_no": "GHK01256555",
         "invoice_date": "01 Nov 2025",
         "incoterm": "FOB - Free On Board",
         "terms": "15 days from Inv. Date",

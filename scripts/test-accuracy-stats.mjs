@@ -46,6 +46,30 @@ try {
         true,
       )
 
+      // 中英文逗号不敏感
+      assert.equal(
+        fieldValuesEqual('description', 'A, B', 'A， B'),
+        true,
+      )
+
+      // 中英文短横不敏感；短横两侧空格差异视为相等
+      assert.equal(
+        fieldValuesEqual('incoterm', 'FOB - Free On Board', 'FOB-Free On Board'),
+        true,
+      )
+      assert.equal(
+        fieldValuesEqual('incoterm', 'FOB - Free On Board', 'FOB－Free On Board'),
+        true,
+      )
+      assert.equal(
+        fieldValuesEqual('description', 'A - B', 'A-B'),
+        true,
+      )
+      assert.equal(
+        fieldValuesEqual('description', 'A- B', 'A -B'),
+        true,
+      )
+
       // 重量/体积：小数末尾 0、单位大小写/空格差异视为相等
       assert.equal(fieldValuesEqual('weight', '10.50 KG', '10.5 KG'), true)
       assert.equal(fieldValuesEqual('weight', '10.50 KG', '10.5kg'), true)

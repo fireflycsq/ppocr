@@ -169,12 +169,17 @@ const MONTH_INDEX: Record<string, number> = {
 
 /**
  * 文本归一：
+ * - 中英文逗号统一为 `,`（， → ,）
+ * - 中英文短横统一为 `-`（－—–─ → -），并去掉短横两侧空格（A - B / A- B / A -B → A-B）
  * - 压缩连续空白
  * - 去掉斜杠两侧空白（A / B、A/ B、A /B 均视为 A/B）
  * - 去首尾空白
  */
 function normalizeText(value: string): string {
   return value
+    .replace(/，/g, ',')
+    .replace(/[－—–─]/g, '-')
+    .replace(/\s*-\s*/g, '-')
     .replace(/\s+/g, ' ')
     .replace(/\s*\/\s*/g, '/')
     .trim()

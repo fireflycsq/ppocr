@@ -100,9 +100,9 @@ export const LABEL_TEMPLATES: LabelLayoutTemplate[] = [
       { id: 'fc2', key: 'charges_in_hkd', label: '收费（CHARGES IN HKD）' },
     ],
     classificationRules: [
-      '目标单证页上部印有 INVOICE 及紧随其后的发票编号，右侧有 INVOICE DATE、CUSTOMER ID、TERMS、INCOTERM 等发票信息网格表，中部有 SHIPMENT DETAILS 装运信息区域。',
+      '目标单证页上部印有大写 INVOICE 及紧随其后的 11 位发票编号（如 GHK01256555），右侧有 INVOICE DATE、CUSTOMER ID、TERMS、INCOTERM 等发票信息网格表，中部有 SHIPMENT DETAILS 装运信息区域。',
       '页面必须包含 CHARGES 费用明细表格（DESCRIPTION / CHARGES IN HKD），且至少有一行费用项目，才可判 is_target=true。',
-      '页面底部有 TOTAL CHARGES 合计区（SUBTOTAL、TOTAL HKD）。',
+      '有效发票头字段少于 5 个，或发票号不是紧跟 INVOICE 的 11 位编号，必须判 is_target=false。',
       '纯付款通知/付款回执（Payment Advice）、对账单、封面页或没有费用明细行的页面，必须判 is_target=false。',
     ],
     requiredSublistKeys: ['description'],

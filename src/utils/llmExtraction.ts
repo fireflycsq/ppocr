@@ -11,6 +11,10 @@ import {
   createInvoiceEntryId,
   createSublistRowId,
 } from './labelingStorage'
+import {
+  findInvoiceByEditDistance,
+  mergeDhlInvoicesByInvoiceNo,
+} from './invoiceMerge'
 
 export type PageStatus = 'target' | 'skipped' | 'error'
 
@@ -61,6 +65,64 @@ function findInvoiceNoKey(template: LabelLayoutTemplate): string | null {
     /invoice.*(no|number)|发票号/i.test(`${field.key} ${field.label}`),
   )
   return match?.key ?? template.headerFields[0]?.key ?? null
+}
+
+function countFilledFields(record: Record<string, string>): number {
+  return Object.values(record).filter((value) => value.length > 0).length
+}
+
+/**
+ * 清洗船运单发票号：去掉模型可能带上的前缀 "INVOICE "，只保留编号本身。
+ * 合法编号恰好 11 位（页面上位于大写 INVOICE 之后，如 GHK01256555）。
+ */
+function normalizeFreightInvoiceNo(invoiceNo: string): string {
+  return invoiceNo.replace(/^INVOICE\s+/i, '').trim()
+}
+
+function isValidFreightInvoiceNo(invoiceNo: string): boolean {
+  return normalizeFreightInvoiceNo(invoiceNo).length === 11
+}
+
+/**
+ * 船运单后置校验：
+ * - 仅有明细、无发票头 → 视为跨页续页，允许；
+ * - 有发票头时：非空 header 字段须 ≥ 5，且发票号长度恰好为 11。
+ */
+function isFreightPageValid(
+  pageInvoices: AggregatedInvoice[],
+  orphans: Array<Record<string, string>>,
+  invoiceNoKey: string | null,
+): boolean {
+  const hasHeaderInvoice = pageInvoices.some((invoice) => hasValues(invoice.header))
+  if (!hasHeaderInvoice) {
+    return orphans.length > 0 || pageInvoices.some((invoice) => invoice.sublist.length > 0)
+  }
+
+  return pageInvoices.every((invoice) => {
+    if (!hasValues(invoice.header)) return true
+    if (countFilledFields(invoice.header) < 5) return false
+    if (!invoiceNoKey) return true
+    return isValidFreightInvoiceNo(invoice.header[invoiceNoKey] ?? '')
+  })
+}
+
+/** 船运单：规范化本页发票号（去掉 INVOICE 前缀） */
+function normalizeFreightPageInvoices(
+  pageInvoices: AggregatedInvoice[],
+  invoiceNoKey: string | null,
+): AggregatedInvoice[] {
+  if (!invoiceNoKey) return pageInvoices
+  return pageInvoices.map((invoice) => {
+    const raw = invoice.header[invoiceNoKey]
+    if (!raw) return invoice
+    return {
+      ...invoice,
+      header: {
+        ...invoice.header,
+        [invoiceNoKey]: normalizeFreightInvoiceNo(raw),
+      },
+    }
+  })
 }
 
 export type { ModelPageImagePreview } from './downloadModelPageImage'
@@ -189,12 +251,15 @@ export async function extractPdfWithLlm(
       if (!raw.isTarget) {
         outcome = { pageIndex: image.pageIndex, status: 'skipped', raw: rawContent }
       } else {
-        const pageInvoices = raw.invoices.map((rawInvoice) => ({
+        let pageInvoices = raw.invoices.map((rawInvoice) => ({
           header: coerceRecord(rawInvoice.header, headerKeys),
           sublist: rawInvoice.sublist
             .map((row) => coerceRecord(row, sublistKeys))
             .filter(isValidSublistRow),
         }))
+        if (template.id === 'freight_invoice') {
+          pageInvoices = normalizeFreightPageInvoices(pageInvoices, invoiceNoKey)
+        }
         const orphans = raw.orphanSublist
           .map((row) => coerceRecord(row, sublistKeys))
           .filter(isValidSublistRow)
@@ -205,21 +270,42 @@ export async function extractPdfWithLlm(
             (invoice) => hasValues(invoice.header) || invoice.sublist.length > 0,
           )
 
-        if (!pageHasContent) {
-          // 模型判为目标页但没有任何有效字段/必填明细（如缺空运单号），按跳过处理
+        const freightInvalid =
+          template.id === 'freight_invoice' &&
+          !isFreightPageValid(pageInvoices, orphans, invoiceNoKey)
+
+        if (!pageHasContent || freightInvalid) {
+          // 模型判为目标页但没有任何有效字段/必填明细，或船运单字段不合规，按跳过处理
           outcome = { pageIndex: image.pageIndex, status: 'skipped', raw: rawContent }
         } else {
           for (const { header, sublist } of pageInvoices) {
             const invoiceNo = invoiceNoKey ? (header[invoiceNoKey] ?? '') : ''
-            const existing = invoiceNo
-              ? invoices.find(
-                  (inv) => invoiceNoKey && inv.header[invoiceNoKey] === invoiceNo,
+            let existing: AggregatedInvoice | undefined
+            if (invoiceNo && invoiceNoKey) {
+              existing = invoices.find((inv) => inv.header[invoiceNoKey] === invoiceNo)
+              // DHL：跨页发票号 OCR 差 1 个字符时合并到已有发票
+              if (!existing && template.id === 'air_waybill_dhl') {
+                existing = findInvoiceByEditDistance(
+                  invoices,
+                  invoiceNoKey,
+                  invoiceNo,
+                  1,
                 )
-              : undefined
+              }
+            }
 
             if (existing) {
               for (const [key, value] of Object.entries(header)) {
                 if (!existing.header[key] && value) existing.header[key] = value
+              }
+              // DHL：保留长度为 13 的发票号
+              if (
+                template.id === 'air_waybill_dhl' &&
+                invoiceNoKey &&
+                invoiceNo.length === 13 &&
+                (existing.header[invoiceNoKey] ?? '').length !== 13
+              ) {
+                existing.header[invoiceNoKey] = invoiceNo
               }
               existing.sublist.push(...sublist)
             } else if (!hasValues(header) && invoices.length > 0) {
@@ -262,9 +348,15 @@ export async function extractPdfWithLlm(
     }
   }
 
-  const hasSublist = invoices.some((inv) => inv.sublist.length > 0)
+  // DHL：最终再合并一次编辑距离 ≤ 1 的发票号，子清单归到 13 位发票号下
+  const finalInvoices =
+    template.id === 'air_waybill_dhl' && invoiceNoKey
+      ? mergeDhlInvoicesByInvoiceNo(invoices, invoiceNoKey)
+      : invoices
+
+  const hasSublist = finalInvoices.some((inv) => inv.sublist.length > 0)
   const structureType: TargetStructureType =
-    invoices.length > 1
+    finalInvoices.length > 1
       ? hasSublist
         ? 'multi_invoice_with_sublist'
         : 'multi_invoice'
@@ -272,7 +364,7 @@ export async function extractPdfWithLlm(
         ? 'invoice_with_sublist'
         : 'single'
 
-  return { structureType, invoices, pageOutcomes }
+  return { structureType, invoices: finalInvoices, pageOutcomes }
 }
 
 /** 与标注页一致的数据形态，四种结构的数据都填充好，便于审核时手动切换结构 */
