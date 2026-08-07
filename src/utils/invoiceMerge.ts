@@ -8,110 +8,106 @@ export function normalizeInvoiceNo(value: string): string {
   return value.replace(/\s+/g, '').toUpperCase()
 }
 
-/** 编辑距离（Levenshtein），用于 DHL 跨页发票号容错合并 */
-export function editDistance(a: string, b: string): number {
-  if (a === b) return 0
-  if (!a.length) return b.length
-  if (!b.length) return a.length
-  const prev = new Array<number>(b.length + 1)
-  const curr = new Array<number>(b.length + 1)
-  for (let j = 0; j <= b.length; j++) prev[j] = j
-  for (let i = 1; i <= a.length; i++) {
-    curr[0] = i
-    for (let j = 1; j <= b.length; j++) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1
-      curr[j] = Math.min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost)
-    }
-    for (let j = 0; j <= b.length; j++) prev[j] = curr[j]
-  }
-  return prev[b.length]
-}
+/** FedEx / DHL 空运单版式：跨页合并为「发票 + 子清单」 */
+export const AIR_WAYBILL_MERGE_TEMPLATE_IDS = new Set([
+  'air_waybill',
+  'air_waybill_dhl',
+])
 
 /**
- * 在已有发票中找「发票号编辑距离 ≤ maxDistance」的匹配项。
- * 距离并列时取最先出现的那张（第一张目标单证）。
+ * 统计各发票号出现次数，选出出现最多的作为权威发票号。
+ * 次数并列时取最先出现的那个。
  */
-export function findInvoiceByEditDistance<T extends MergeableInvoice>(
-  invoices: T[],
-  invoiceNoKey: string,
-  invoiceNo: string,
-  maxDistance: number,
-): T | undefined {
-  const target = normalizeInvoiceNo(invoiceNo)
-  if (!target) return undefined
-  let best: T | undefined
-  let bestDistance = maxDistance + 1
-  for (const invoice of invoices) {
-    const existingNo = normalizeInvoiceNo(invoice.header[invoiceNoKey] ?? '')
-    if (!existingNo) continue
-    const distance = editDistance(existingNo, target)
-    // 严格 < ：距离相等时保留先出现的第一张
-    if (distance <= maxDistance && distance < bestDistance) {
-      best = invoice
-      bestDistance = distance
+export function pickMajorityInvoiceNo(
+  counts: Map<string, number>,
+): string | null {
+  let bestKey: string | null = null
+  let bestCount = 0
+  for (const [key, count] of counts) {
+    if (!key) continue
+    if (count > bestCount) {
+      bestKey = key
+      bestCount = count
     }
   }
-  return best
+  return bestKey
 }
 
-function mergeHeaderInto(
+function mergeHeaderFields(
   target: MergeableInvoice,
   source: MergeableInvoice,
   invoiceNoKey: string,
 ): void {
-  const keepInvoiceNo = target.header[invoiceNoKey] ?? ''
   for (const [key, value] of Object.entries(source.header)) {
     if (key === invoiceNoKey) continue
     if (!target.header[key] && value) target.header[key] = value
-  }
-  // 编辑距离命中时，始终保留第一张目标单证的发票号
-  if (keepInvoiceNo) {
-    target.header[invoiceNoKey] = keepInvoiceNo
-  } else if (source.header[invoiceNoKey]) {
-    target.header[invoiceNoKey] = source.header[invoiceNoKey]
   }
   target.sublist.push(...source.sublist)
 }
 
 /**
- * DHL：跨页多发票号若编辑距离 ≤ 1，合并子清单到「第一张」目标单证下，
- * 并始终保留第一张的发票号（不再用后续页的 13 位号覆盖）。
+ * FedEx / DHL 统一合并规则：
+ * - 按跨页出现次数选出最多的发票号为权威编号；
+ * - 所有子清单合并到该发票下；
+ * - 其余发票号视为识别错误，丢弃其发票号，仅保留明细。
+ * @param invoiceNoCounts 各归一化发票号在抽取过程中出现的次数（按页累计）
  */
-export function mergeDhlInvoicesByInvoiceNo<T extends MergeableInvoice>(
+export function mergeAirWaybillByMajorityInvoiceNo<T extends MergeableInvoice>(
   invoices: T[],
   invoiceNoKey: string,
+  invoiceNoCounts: Map<string, number>,
 ): T[] {
-  if (invoices.length <= 1) return invoices
+  if (invoices.length === 0) return invoices
 
-  const merged: T[] = []
-  for (const invoice of invoices) {
-    const invoiceNo = invoice.header[invoiceNoKey] ?? ''
-    const existing = invoiceNo
-      ? findInvoiceByEditDistance(merged, invoiceNoKey, invoiceNo, 1)
-      : undefined
-
-    if (!existing) {
-      merged.push(invoice)
-      continue
-    }
-
-    mergeHeaderInto(existing, invoice, invoiceNoKey)
+  let majorityKey = pickMajorityInvoiceNo(invoiceNoCounts)
+  if (!majorityKey) {
+    const firstNo =
+      invoices.find((inv) => (inv.header[invoiceNoKey] ?? '').trim())?.header[
+        invoiceNoKey
+      ] ?? ''
+    majorityKey = normalizeInvoiceNo(firstNo) || null
   }
-  return merged
+
+  // 优先用已带权威发票号的那张作为底座；否则用第一张
+  let canonical: T | undefined
+  if (majorityKey) {
+    canonical = invoices.find(
+      (inv) => normalizeInvoiceNo(inv.header[invoiceNoKey] ?? '') === majorityKey,
+    )
+  }
+  if (!canonical) canonical = invoices[0]
+
+  // 权威发票号：保留底座上的原文形态；若底座没有则回填出现最多的归一化值
+  const canonicalInvoiceNo =
+    (normalizeInvoiceNo(canonical.header[invoiceNoKey] ?? '') === majorityKey
+      ? canonical.header[invoiceNoKey]
+      : '') ||
+    majorityKey ||
+    ''
+
+  const result: T = {
+    ...canonical,
+    header: { ...canonical.header },
+    sublist: [...canonical.sublist],
+  }
+  if (canonicalInvoiceNo) {
+    result.header[invoiceNoKey] = canonicalInvoiceNo
+  }
+
+  for (const invoice of invoices) {
+    if (invoice === canonical) continue
+    mergeHeaderFields(result, invoice, invoiceNoKey)
+  }
+
+  return [result]
 }
 
-/**
- * DHL 单 PDF 默认「发票 + 子清单」：将所有发票折叠为第一张，
- * 子清单全部归并，发票号固定为第一张目标单证的发票号。
- */
-export function collapseDhlToFirstInvoice<T extends MergeableInvoice>(
-  invoices: T[],
-  invoiceNoKey: string,
-): T[] {
-  if (invoices.length <= 1) return invoices
-  const [first, ...rest] = invoices
-  for (const invoice of rest) {
-    mergeHeaderInto(first, invoice, invoiceNoKey)
-  }
-  return [first]
+/** 累计发票号出现次数（空值不计） */
+export function bumpInvoiceNoCount(
+  counts: Map<string, number>,
+  invoiceNo: string,
+): void {
+  const key = normalizeInvoiceNo(invoiceNo)
+  if (!key) return
+  counts.set(key, (counts.get(key) ?? 0) + 1)
 }

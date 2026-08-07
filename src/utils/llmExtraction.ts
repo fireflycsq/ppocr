@@ -12,9 +12,10 @@ import {
   createSublistRowId,
 } from './labelingStorage'
 import {
-  collapseDhlToFirstInvoice,
-  findInvoiceByEditDistance,
-  mergeDhlInvoicesByInvoiceNo,
+  AIR_WAYBILL_MERGE_TEMPLATE_IDS,
+  bumpInvoiceNoCount,
+  mergeAirWaybillByMajorityInvoiceNo,
+  normalizeInvoiceNo,
 } from './invoiceMerge'
 
 export type PageStatus = 'target' | 'skipped' | 'error'
@@ -222,6 +223,9 @@ export async function extractPdfWithLlm(
   /** 出现在第一张发票之前的孤儿明细行（少见，但避免丢数据） */
   const pendingOrphans: Array<Record<string, string>> = []
   const pageOutcomes: PageOutcome[] = []
+  /** FedEx/DHL：跨页发票号出现次数，用于多数表决合并 */
+  const invoiceNoCounts = new Map<string, number>()
+  const isAirWaybillMerge = AIR_WAYBILL_MERGE_TEMPLATE_IDS.has(template.id)
 
   for (let i = 0; i < images.length; i++) {
     if (signal?.aborted) throw new DOMException('已中断', 'AbortError')
@@ -281,30 +285,21 @@ export async function extractPdfWithLlm(
         } else {
           for (const { header, sublist } of pageInvoices) {
             const invoiceNo = invoiceNoKey ? (header[invoiceNoKey] ?? '') : ''
+            if (isAirWaybillMerge && invoiceNo) {
+              bumpInvoiceNoCount(invoiceNoCounts, invoiceNo)
+            }
+
             let existing: AggregatedInvoice | undefined
             if (invoiceNo && invoiceNoKey) {
-              existing = invoices.find((inv) => inv.header[invoiceNoKey] === invoiceNo)
-              // DHL：跨页发票号 OCR 差 1 个字符时合并到已有发票
-              if (!existing && template.id === 'air_waybill_dhl') {
-                existing = findInvoiceByEditDistance(
-                  invoices,
-                  invoiceNoKey,
-                  invoiceNo,
-                  1,
-                )
-              }
+              const normalized = normalizeInvoiceNo(invoiceNo)
+              existing = invoices.find(
+                (inv) =>
+                  normalizeInvoiceNo(inv.header[invoiceNoKey] ?? '') === normalized,
+              )
             }
 
             if (existing) {
               for (const [key, value] of Object.entries(header)) {
-                // DHL：发票号始终保留第一张目标单证的，不覆盖
-                if (
-                  template.id === 'air_waybill_dhl' &&
-                  invoiceNoKey &&
-                  key === invoiceNoKey
-                ) {
-                  continue
-                }
                 if (!existing.header[key] && value) existing.header[key] = value
               }
               existing.sublist.push(...sublist)
@@ -348,27 +343,27 @@ export async function extractPdfWithLlm(
     }
   }
 
-  // DHL：编辑距离 ≤ 1 的发票先合并（保留第一张发票号），再折叠为单发票+子清单
+  // FedEx / DHL：子清单全部归到出现次数最多的发票号，其余发票号视为识别错误
   let finalInvoices = invoices
-  if (template.id === 'air_waybill_dhl' && invoiceNoKey) {
-    finalInvoices = collapseDhlToFirstInvoice(
-      mergeDhlInvoicesByInvoiceNo(invoices, invoiceNoKey),
+  if (isAirWaybillMerge && invoiceNoKey) {
+    finalInvoices = mergeAirWaybillByMajorityInvoiceNo(
+      invoices,
       invoiceNoKey,
+      invoiceNoCounts,
     )
   }
 
-  // DHL 单 PDF 默认「发票 + 子清单」；其它版式按发票数量推断
+  // FedEx / DHL 单 PDF 默认「发票 + 子清单」；其它版式按发票数量推断
   const hasSublist = finalInvoices.some((inv) => inv.sublist.length > 0)
-  const structureType: TargetStructureType =
-    template.id === 'air_waybill_dhl'
-      ? 'invoice_with_sublist'
-      : finalInvoices.length > 1
-        ? hasSublist
-          ? 'multi_invoice_with_sublist'
-          : 'multi_invoice'
-        : hasSublist
-          ? 'invoice_with_sublist'
-          : 'single'
+  const structureType: TargetStructureType = isAirWaybillMerge
+    ? 'invoice_with_sublist'
+    : finalInvoices.length > 1
+      ? hasSublist
+        ? 'multi_invoice_with_sublist'
+        : 'multi_invoice'
+      : hasSublist
+        ? 'invoice_with_sublist'
+        : 'single'
 
   return { structureType, invoices: finalInvoices, pageOutcomes }
 }

@@ -15,54 +15,52 @@ try {
     `
       import { strict as assert } from 'node:assert'
       import {
-        collapseDhlToFirstInvoice,
-        editDistance,
-        mergeDhlInvoicesByInvoiceNo,
+        bumpInvoiceNoCount,
+        mergeAirWaybillByMajorityInvoiceNo,
         normalizeInvoiceNo,
+        pickMajorityInvoiceNo,
       } from '${process.cwd()}/src/utils/invoiceMerge.ts'
       import { fieldValuesEqual } from '${process.cwd()}/src/utils/accuracyStats.ts'
 
-      assert.equal(editDistance('HKGIR02836829', 'HKGIR02836829'), 0)
-      assert.equal(editDistance('HKGIR02836829', 'HKGIR02836828'), 1)
-      assert.equal(editDistance('HKGIR02836829', 'HKGIR0283682'), 1)
-      assert.equal(editDistance('HKGIR02836829', 'HKGIR02836800'), 2)
-      assert.ok(editDistance('HKGIR02836829', 'XXXXXXXXXXXXX') > 1)
       assert.equal(normalizeInvoiceNo(' hkgir 02836829 '), 'HKGIR02836829')
 
-      // DHL：编辑距离 ≤ 1 时合并，发票号保留第一张（不再被后续 13 位覆盖）
-      const merged = mergeDhlInvoicesByInvoiceNo(
+      const counts = new Map()
+      bumpInvoiceNoCount(counts, '9-522-83357')
+      bumpInvoiceNoCount(counts, '9-522-83357')
+      bumpInvoiceNoCount(counts, '9-522-8335Z') // OCR 错号，只出现 1 次
+      bumpInvoiceNoCount(counts, '9-522-83357')
+      assert.equal(pickMajorityInvoiceNo(counts), '9-522-83357')
+
+      // FedEx/DHL：子清单全部归到出现最多的发票号，其余发票号视为识别错误
+      const merged = mergeAirWaybillByMajorityInvoiceNo(
         [
           {
-            header: { invoice_no: 'HKGIR0283682', invoice_date: '30/11/2025' },
+            header: { invoice_no: '9-522-83357', invoice_date: '13 Nov 2025' },
             sublist: [{ air_waybill_number: '111', total: '10.00' }],
           },
           {
-            header: { invoice_no: 'HKGIR02836829', invoice_date: '' },
+            header: { invoice_no: '9-522-8335Z', invoice_date: '' },
             sublist: [{ air_waybill_number: '222', total: '20.00' }],
           },
           {
-            header: { invoice_no: 'OTHERINVOICE01', invoice_date: '01/01/2025' },
+            header: { invoice_no: '9-522-83357', invoice_date: '' },
             sublist: [{ air_waybill_number: '333', total: '30.00' }],
           },
         ],
         'invoice_no',
+        counts,
       )
-      assert.equal(merged.length, 2)
-      const firstGroup = merged.find((inv) => inv.header.invoice_no === 'HKGIR0283682')
-      assert.ok(firstGroup)
-      assert.equal(firstGroup.header.invoice_date, '30/11/2025')
-      assert.equal(firstGroup.sublist.length, 2)
-      assert.equal(
-        merged.find((inv) => inv.header.invoice_no === 'OTHERINVOICE01')?.sublist.length,
-        1,
-      )
+      assert.equal(merged.length, 1)
+      assert.equal(merged[0].header.invoice_no, '9-522-83357')
+      assert.equal(merged[0].header.invoice_date, '13 Nov 2025')
+      assert.equal(merged[0].sublist.length, 3)
 
-      // DHL 默认发票+子清单：全部折叠到第一张目标单证
-      const collapsed = collapseDhlToFirstInvoice(merged, 'invoice_no')
-      assert.equal(collapsed.length, 1)
-      assert.equal(collapsed[0].header.invoice_no, 'HKGIR0283682')
-      assert.equal(collapsed[0].sublist.length, 3)
-      assert.equal(collapsed[0].header.invoice_date, '30/11/2025')
+      // 次数并列时取先出现的发票号
+      const tieCounts = new Map([
+        ['AAA111', 2],
+        ['BBB222', 2],
+      ])
+      assert.equal(pickMajorityInvoiceNo(tieCounts), 'AAA111')
 
       // 准确率：逗号/短横规则（与主测试互补）
       assert.equal(fieldValuesEqual('incoterm', 'FOB—Free On Board', 'FOB - Free On Board'), true)
