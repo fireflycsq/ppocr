@@ -12,6 +12,7 @@ import {
   createSublistRowId,
 } from './labelingStorage'
 import {
+  collapseDhlToFirstInvoice,
   findInvoiceByEditDistance,
   mergeDhlInvoicesByInvoiceNo,
 } from './invoiceMerge'
@@ -296,16 +297,15 @@ export async function extractPdfWithLlm(
 
             if (existing) {
               for (const [key, value] of Object.entries(header)) {
+                // DHL：发票号始终保留第一张目标单证的，不覆盖
+                if (
+                  template.id === 'air_waybill_dhl' &&
+                  invoiceNoKey &&
+                  key === invoiceNoKey
+                ) {
+                  continue
+                }
                 if (!existing.header[key] && value) existing.header[key] = value
-              }
-              // DHL：保留长度为 13 的发票号
-              if (
-                template.id === 'air_waybill_dhl' &&
-                invoiceNoKey &&
-                invoiceNo.length === 13 &&
-                (existing.header[invoiceNoKey] ?? '').length !== 13
-              ) {
-                existing.header[invoiceNoKey] = invoiceNo
               }
               existing.sublist.push(...sublist)
             } else if (!hasValues(header) && invoices.length > 0) {
@@ -348,21 +348,27 @@ export async function extractPdfWithLlm(
     }
   }
 
-  // DHL：最终再合并一次编辑距离 ≤ 1 的发票号，子清单归到 13 位发票号下
-  const finalInvoices =
-    template.id === 'air_waybill_dhl' && invoiceNoKey
-      ? mergeDhlInvoicesByInvoiceNo(invoices, invoiceNoKey)
-      : invoices
+  // DHL：编辑距离 ≤ 1 的发票先合并（保留第一张发票号），再折叠为单发票+子清单
+  let finalInvoices = invoices
+  if (template.id === 'air_waybill_dhl' && invoiceNoKey) {
+    finalInvoices = collapseDhlToFirstInvoice(
+      mergeDhlInvoicesByInvoiceNo(invoices, invoiceNoKey),
+      invoiceNoKey,
+    )
+  }
 
+  // DHL 单 PDF 默认「发票 + 子清单」；其它版式按发票数量推断
   const hasSublist = finalInvoices.some((inv) => inv.sublist.length > 0)
   const structureType: TargetStructureType =
-    finalInvoices.length > 1
-      ? hasSublist
-        ? 'multi_invoice_with_sublist'
-        : 'multi_invoice'
-      : hasSublist
-        ? 'invoice_with_sublist'
-        : 'single'
+    template.id === 'air_waybill_dhl'
+      ? 'invoice_with_sublist'
+      : finalInvoices.length > 1
+        ? hasSublist
+          ? 'multi_invoice_with_sublist'
+          : 'multi_invoice'
+        : hasSublist
+          ? 'invoice_with_sublist'
+          : 'single'
 
   return { structureType, invoices: finalInvoices, pageOutcomes }
 }
