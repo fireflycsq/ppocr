@@ -55,6 +55,12 @@ curl -X POST http://localhost:8080/api/v1/extract \
   -F "template_id=air_waybill" \
   -F "files=@invoice.pdf"
 
+# 可选：指定模型（默认 qwen3.8:latest）
+# curl -X POST http://localhost:8080/api/v1/extract \
+#   -F "template_id=air_waybill" \
+#   -F "llm_model=qwen3-vl:4b" \
+#   -F "files=@invoice.pdf"
+
 # 将返回的 id 填入
 curl http://localhost:8080/api/v1/jobs/<job_id>
 curl http://localhost:8080/api/v1/jobs/<job_id>/result

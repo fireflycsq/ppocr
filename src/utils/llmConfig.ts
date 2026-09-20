@@ -10,7 +10,7 @@ export interface LlmExtractionConfig {
   requestJson: string
 }
 
-export const DEFAULT_LLM_MODEL = 'qwen3-vl:4b'
+export const DEFAULT_LLM_MODEL = 'qwen3.8:latest'
 
 /** 请求 JSON 中的页图片占位符，发送时替换为当页 base64 */
 export const PAGE_IMAGE_PLACEHOLDER = '{{PAGE_IMAGE}}'

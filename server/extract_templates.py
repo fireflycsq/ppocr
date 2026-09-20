@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, TypedDict
 
 
 PAGE_IMAGE_PLACEHOLDER = "{{PAGE_IMAGE}}"
-DEFAULT_LLM_MODEL = os.environ.get("EXTRACT_LLM_MODEL", "qwen3-vl:4b")
+DEFAULT_LLM_MODEL = os.environ.get("EXTRACT_LLM_MODEL", "qwen3.8:latest")
 
 
 class FieldDef(TypedDict):
@@ -342,11 +342,16 @@ def default_options_for(template_id: str) -> Dict[str, Any]:
     return dict(DEFAULT_EXTRACT_OPTIONS)
 
 
+def resolve_llm_model(llm_model: Optional[str] = None) -> str:
+    """请求未传模型时使用默认；空白字符串视为未传。"""
+    return (llm_model or "").strip() or DEFAULT_LLM_MODEL
+
+
 def build_request_json(
     template_id: str, llm_model: Optional[str] = None
 ) -> str:
     template = get_template(template_id)
-    model = (llm_model or "").strip() or DEFAULT_LLM_MODEL
+    model = resolve_llm_model(llm_model)
     body = {
         "model": model,
         "stream": True,

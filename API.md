@@ -15,7 +15,7 @@ docker compose ps
 | 服务器本机 | `http://127.0.0.1:8080` | `http://127.0.0.1:8080/api/v1/docs` |
 | 其他机器 | `http://<服务器IP>:8080` | `http://<服务器IP>:8080/api/v1/docs` |
 
-网页顶部导航 **接口文档** 同样可用。依赖 label-api 与可达的 Ollama（默认模型 `qwen3-vl:4b`）。
+网页顶部导航 **接口文档** 同样可用。依赖 label-api 与可达的 Ollama（默认模型 **`qwen3.8:latest`**，可用表单字段 `llm_model` 覆盖）。
 
 ## 鉴权
 
@@ -55,9 +55,15 @@ export BASE=http://127.0.0.1:8080
 curl "$BASE/api/v1/health"
 curl "$BASE/api/v1/templates"
 
-# 提交任务（返回 202 与 job id）
+# 提交任务（默认模型 qwen3.8:latest）
 curl -sS -X POST "$BASE/api/v1/extract" \
   -F "template_id=air_waybill" \
+  -F "files=@./invoice.pdf"
+
+# 指定其他模型
+curl -sS -X POST "$BASE/api/v1/extract" \
+  -F "template_id=air_waybill" \
+  -F "llm_model=qwen3-vl:4b" \
   -F "files=@./invoice.pdf"
 
 # 将上一步 JSON 中的 id 填入
@@ -95,7 +101,8 @@ curl "$BASE/api/v1/jobs/$JOB_ID/result"
   "status": "healthy",
   "service": "document-extract-api",
   "auth_required": false,
-  "templates": ["air_waybill", "air_waybill_dhl", "freight_invoice"]
+  "templates": ["air_waybill", "air_waybill_dhl", "freight_invoice"],
+  "default_llm_model": "qwen3.8:latest"
 }
 ```
 
@@ -149,7 +156,7 @@ curl "$BASE/api/v1/jobs/$JOB_ID/result"
 |------|------|------|------|
 | `files` | file | 是 | 一个或多个 PDF，字段名必须为 `files`。单文件默认上限 40MB，单次最多 50 个（`LLM_JOB_MAX_MB` / `LLM_JOB_MAX_FILES`） |
 | `template_id` | string | 是 | 见上表 |
-| `llm_model` | string | 否 | 覆盖默认 Ollama 模型名 |
+| `llm_model` | string | 否 | Ollama 模型名。不传则使用 `qwen3.8:latest`（可用环境变量 `EXTRACT_LLM_MODEL` 改默认值） |
 
 ### Query
 
@@ -161,8 +168,13 @@ curl "$BASE/api/v1/jobs/$JOB_ID/result"
 
 ```bash
 curl -X POST "http://127.0.0.1:8080/api/v1/extract" \
-  -H "X-API-Key: $EXTRACT_API_KEY" \
   -F "template_id=air_waybill" \
+  -F "files=@/path/to/fedex-invoice.pdf"
+
+# 可选：指定模型
+curl -X POST "http://127.0.0.1:8080/api/v1/extract" \
+  -F "template_id=air_waybill" \
+  -F "llm_model=qwen3-vl:4b" \
   -F "files=@/path/to/fedex-invoice.pdf"
 ```
 
@@ -190,7 +202,7 @@ curl -X POST "http://127.0.0.1:8080/api/v1/extract" \
   "id": "job-a1b2c3d4e5f6",
   "status": "queued",
   "template_id": "air_waybill",
-  "llm_model": "qwen3-vl:4b",
+  "llm_model": "qwen3.8:latest",
   "created_at": "2026-09-14T07:12:00.000000+00:00",
   "updated_at": "2026-09-14T07:12:00.000000+00:00",
   "error": null,
@@ -255,7 +267,7 @@ FedEx / DHL 空运单典型结构（`structure_type = invoice_with_sublist`）�
   "id": "job-a1b2c3d4e5f6",
   "status": "completed",
   "template_id": "air_waybill",
-  "llm_model": "qwen3-vl:4b",
+  "llm_model": "qwen3.8:latest",
   "documents": [
     {
       "id": "doc-9f8e7d6c5b",
@@ -272,7 +284,7 @@ FedEx / DHL 空运单典型结构（`structure_type = invoice_with_sublist`）�
         {"air_waybill_number": "444760472792", "total": "17.09"}
       ],
       "extraction": {
-        "engine": "ollama/qwen3-vl:4b",
+        "engine": "ollama/qwen3.8:latest",
         "layoutTemplateId": "air_waybill",
         "totalPages": 3,
         "targetPages": [2, 3],
@@ -378,7 +390,7 @@ EXTRACT_API_BASE=http://127.0.0.1:8080 \
 | 变量 | 默认 | 说明 |
 |------|------|------|
 | `OLLAMA_BASE` | `http://127.0.0.1:11434` | Ollama 地址 |
-| `EXTRACT_LLM_MODEL` | `qwen3-vl:4b` | 默认视觉模型 |
+| `EXTRACT_LLM_MODEL` | `qwen3.8:latest` | 默认 Ollama 模型；请求里的 `llm_model` 优先 |
 | `EXTRACT_API_KEY` | 空 | 非空则启用 `X-API-Key` |
 | `EXTRACT_SYNC_TIMEOUT` | `1700` | `wait=true` 最长等待秒数 |
 | `LLM_JOB_MAX_FILES` | `50` | 单次最多 PDF 数 |

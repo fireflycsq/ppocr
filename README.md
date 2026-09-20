@@ -14,9 +14,15 @@
 
 curl http://127.0.0.1:8080/api/v1/health
 
-# 提交 FedEx 空运单
+# 提交 FedEx 空运单（默认模型 qwen3.8:latest）
 curl -X POST "http://127.0.0.1:8080/api/v1/extract" \
   -F "template_id=air_waybill" \
+  -F "files=@invoice.pdf"
+
+# 可选：指定模型
+curl -X POST "http://127.0.0.1:8080/api/v1/extract" \
+  -F "template_id=air_waybill" \
+  -F "llm_model=qwen3-vl:4b" \
   -F "files=@invoice.pdf"
 
 # 按返回的 job id 查询结果

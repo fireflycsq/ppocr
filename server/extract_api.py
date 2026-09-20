@@ -11,11 +11,13 @@ from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 
 from extract_templates import (
+    DEFAULT_LLM_MODEL,
     UnknownTemplateError,
     build_request_json,
     get_template,
     list_templates,
     public_template,
+    resolve_llm_model,
 )
 from llm_jobs import (
     _doc_pdf_path,
@@ -164,6 +166,7 @@ async def extract_health(_auth: None = Depends(require_api_key)) -> Dict[str, An
         "service": "document-extract-api",
         "auth_required": bool(EXTRACT_API_KEY),
         "templates": [item["id"] for item in list_templates()],
+        "default_llm_model": DEFAULT_LLM_MODEL,
     }
 
 
@@ -191,7 +194,10 @@ async def create_extract_job(
         ...,
         description="版式 ID：air_waybill / air_waybill_dhl / freight_invoice",
     ),
-    llm_model: str = Form("", description="可选，覆盖默认 Ollama 模型名"),
+    llm_model: Optional[str] = Form(
+        None,
+        description="可选。Ollama 模型名；不传则使用默认 qwen3.8:latest",
+    ),
     wait: bool = Query(
         False,
         description="true 时阻塞直到任务结束（或超时），并返回完整抽取结果",
@@ -207,14 +213,15 @@ async def create_extract_job(
     for upload in files:
         file_items.append((upload.filename or "document.pdf", await upload.read()))
 
+    model = resolve_llm_model(llm_model)
     job = create_stored_job(
         file_items=file_items,
         template_id=template["id"],
-        request_json=build_request_json(template["id"], llm_model),
+        request_json=build_request_json(template["id"], model),
         header_fields=list(template["header_fields"]),
         sublist_columns=list(template["sublist_columns"]),
         required_sublist_keys=list(template["required_sublist_keys"]),
-        llm_model=llm_model,
+        llm_model=model,
     )
 
     if wait:

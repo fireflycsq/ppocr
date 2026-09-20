@@ -27,7 +27,7 @@ services:
       # 后台批量预识别直连 Ollama（与 frontend 的 LLM_UPSTREAM 保持一致）
       OLLAMA_BASE: http://${LLM_UPSTREAM:-host.docker.internal:11434}
       EXTRACT_API_KEY: ${EXTRACT_API_KEY:-}
-      EXTRACT_LLM_MODEL: ${EXTRACT_LLM_MODEL:-qwen3-vl:4b}
+      EXTRACT_LLM_MODEL: ${EXTRACT_LLM_MODEL:-qwen3.8:latest}
     extra_hosts:
       - 'host.docker.internal:host-gateway'
     healthcheck:

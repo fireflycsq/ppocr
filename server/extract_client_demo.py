@@ -37,11 +37,15 @@ def list_templates() -> None:
     print()
 
 
-def extract_pdf(pdf_path: str, template_id: str, wait: bool = False) -> Dict[str, Any]:
+def extract_pdf(
+    pdf_path: str, template_id: str, wait: bool = False, llm_model: str = ""
+) -> Dict[str, Any]:
     print(f"=== 提交抽取：{pdf_path}（template={template_id}）===")
     with open(pdf_path, "rb") as fh:
         files = {"files": (os.path.basename(pdf_path), fh, "application/pdf")}
         data = {"template_id": template_id}
+        if llm_model.strip():
+            data["llm_model"] = llm_model.strip()
         response = requests.post(
             f"{BASE_URL}/api/v1/extract",
             headers=_headers(),
@@ -87,6 +91,7 @@ def fetch_result(job_id: str) -> Dict[str, Any]:
 def main(argv: list[str]) -> int:
     pdf_path = argv[1] if len(argv) > 1 else ""
     template_id = argv[2] if len(argv) > 2 else "air_waybill"
+    llm_model = argv[3] if len(argv) > 3 else ""
 
     print(f"BASE_URL={BASE_URL}")
     health = requests.get(f"{BASE_URL}/api/v1/health", headers=_headers(), timeout=15)
@@ -95,15 +100,16 @@ def main(argv: list[str]) -> int:
     list_templates()
 
     if not pdf_path:
-        print("用法: python extract_client_demo.py <invoice.pdf> [template_id]")
+        print("用法: python extract_client_demo.py <invoice.pdf> [template_id] [llm_model]")
         print("示例: EXTRACT_API_BASE=http://127.0.0.1:8080 python extract_client_demo.py ./fedex.pdf air_waybill")
+        print("指定模型: python extract_client_demo.py ./fedex.pdf air_waybill qwen3-vl:4b")
         return 0
 
     if not os.path.isfile(pdf_path):
         print(f"找不到文件: {pdf_path}")
         return 1
 
-    job = extract_pdf(pdf_path, template_id, wait=False)
+    job = extract_pdf(pdf_path, template_id, wait=False, llm_model=llm_model)
     print("已受理:", json.dumps({"id": job["id"], "status": job["status"]}, ensure_ascii=False))
     wait_for_job(job["id"])
     result = fetch_result(job["id"])

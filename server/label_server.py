@@ -22,6 +22,8 @@ EXTRACT_API_DESCRIPTION = """
 
 **内置版式：** `air_waybill`（FedEx）、`air_waybill_dhl`（DHL）、`freight_invoice`（GEODIS）
 
+**默认模型：** `qwen3.8:latest`。调用 `POST /api/v1/extract` 时可传表单字段 `llm_model` 覆盖。
+
 若部署时配置了 `EXTRACT_API_KEY`，请点击右上角 **Authorize**，填入 `X-API-Key`。
 """
 

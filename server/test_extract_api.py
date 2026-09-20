@@ -15,10 +15,12 @@ import extract_api
 import llm_jobs
 from extract_api import public_job, router
 from extract_templates import (
+    DEFAULT_LLM_MODEL,
     UnknownTemplateError,
     build_request_json,
     get_template,
     list_templates,
+    resolve_llm_model,
 )
 from llm_extract import PageOutcome, build_export_payload
 from llm_extract import AggregatedInvoice
@@ -46,6 +48,16 @@ class ExtractTemplatesTest(unittest.TestCase):
         self.assertIn("Air Waybill Number", body["messages"][-1]["content"])
         self.assertGreaterEqual(body["options"]["num_predict"], 1024)
 
+    def test_default_and_override_llm_model(self):
+        self.assertEqual(DEFAULT_LLM_MODEL, "qwen3.8:latest")
+        self.assertEqual(resolve_llm_model(None), "qwen3.8:latest")
+        self.assertEqual(resolve_llm_model("  "), "qwen3.8:latest")
+        self.assertEqual(resolve_llm_model("qwen3-vl:4b"), "qwen3-vl:4b")
+        self.assertEqual(
+            json.loads(build_request_json("air_waybill"))["model"],
+            "qwen3.8:latest",
+        )
+
 
 class ExtractApiHttpTest(unittest.TestCase):
     def setUp(self):
@@ -63,6 +75,7 @@ class ExtractApiHttpTest(unittest.TestCase):
         health = self.client.get("/api/v1/health")
         self.assertEqual(health.status_code, 200)
         self.assertIn("air_waybill", health.json()["templates"])
+        self.assertEqual(health.json()["default_llm_model"], "qwen3.8:latest")
 
         listed = self.client.get("/api/v1/templates")
         self.assertEqual(listed.status_code, 200)
@@ -89,6 +102,15 @@ class ExtractApiHttpTest(unittest.TestCase):
         self.assertEqual(job["template_id"], "air_waybill")
         self.assertEqual(len(job["documents"]), 1)
         self.assertEqual(job["documents"][0]["file_name"], "invoice.pdf")
+        self.assertEqual(job["llm_model"], "qwen3.8:latest")
+
+        overridden = self.client.post(
+            "/api/v1/extract",
+            data={"template_id": "air_waybill", "llm_model": "qwen3-vl:4b"},
+            files={"files": ("invoice.pdf", MINIMAL_PDF, "application/pdf")},
+        )
+        self.assertEqual(overridden.status_code, 202, overridden.text)
+        self.assertEqual(overridden.json()["llm_model"], "qwen3-vl:4b")
 
         fetched = self.client.get(f"/api/v1/jobs/{job['id']}")
         self.assertEqual(fetched.status_code, 200)
