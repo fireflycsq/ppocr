@@ -2,7 +2,26 @@
 
 完整流程：**上传图片/PDF → PaddleOCR-VL 识别 → 展示文本与检测框 → 配置字段 → 采纳/不采纳 → 导出 JSON**
 
-后端 API 基于 `server/main.py`（PaddleOCR-VL），调用方式见 `server/client_demo.py`。
+文档抽取对外接口见 **[API.md](./API.md)**（`POST /api/v1/extract`）。OCR 识别仍基于 `server/main.py`，调用方式见 `server/client_demo.py`。
+
+## 文档抽取 API（对接其他系统）
+
+上传 PDF + 版式 ID，异步返回发票头与明细 JSON。完整说明、字段表和错误码见 **[API.md](./API.md)**。
+
+```bash
+# 启动 label-api（默认 8001）
+npm run dev:label
+
+# 提交 FedEx 空运单
+curl -X POST "http://localhost:8001/api/v1/extract" \
+  -F "template_id=air_waybill" \
+  -F "files=@invoice.pdf"
+
+# 按返回的 job id 查询结果
+curl "http://localhost:8001/api/v1/jobs/<job_id>/result"
+```
+
+Python 示例：`server/extract_client_demo.py`。网页交互文档：顶部导航 **接口文档**，或打开 `/api/v1/docs`。
 
 ## 本地开发
 

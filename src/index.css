@@ -104,6 +104,63 @@ body {
   overflow: hidden;
 }
 
+.api-docs-page {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: #fff;
+}
+
+.api-docs-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 24px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.api-docs-toolbar h1 {
+  margin: 0;
+  font-size: 1.125rem;
+}
+
+.api-docs-toolbar p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.8125rem;
+}
+
+.api-docs-frame {
+  flex: 1;
+  width: 100%;
+  border: 0;
+  min-height: 0;
+  background: #fff;
+}
+
+.api-docs-fallback {
+  margin: 48px auto;
+  max-width: 480px;
+  text-align: center;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.api-docs-fallback strong {
+  display: block;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+
+.api-docs-fallback code {
+  font-size: 0.8125rem;
+  background: #f1f5f9;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
 .ocr-review-page {
   flex: 1;
   display: flex;

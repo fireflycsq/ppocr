@@ -11,6 +11,19 @@ server {
     # 这样 OCR 容器未启动时 nginx 也能正常启动（OCR 接口返回 502）
     resolver 127.0.0.11 valid=10s ipv6=off;
 
+    # Swagger / ReDoc 交互文档（label-api）
+    location = /docs {
+        return 302 /api/v1/docs;
+    }
+
+    location = /redoc {
+        return 302 /api/v1/redoc;
+    }
+
+    location = /openapi.json {
+        return 302 /api/v1/openapi.json;
+    }
+
     # OCR 健康检查
     location /health {
         set $ocr_upstream ${OCR_UPSTREAM};
@@ -63,6 +76,24 @@ server {
         proxy_connect_timeout 10s;
         proxy_read_timeout 60s;
         proxy_send_timeout 60s;
+    }
+
+    # 对外文档抽取 API（异步任务 + SSE）
+    location /api/v1/ {
+        proxy_pass http://${LABEL_UPSTREAM};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_request_buffering off;
+        chunked_transfer_encoding on;
+        proxy_connect_timeout 30s;
+        proxy_read_timeout 1800s;
+        proxy_send_timeout 1800s;
     }
 
     # Qwen3-VL / Ollama API（/api/llm/api/chat -> ollama /api/chat）

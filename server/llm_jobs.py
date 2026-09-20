@@ -502,36 +502,32 @@ def _parse_json_field(raw: str, field_name: str) -> Any:
         ) from exc
 
 
-@router.post("")
-async def create_llm_job(
-    files: List[UploadFile] = File(...),
-    template_id: str = Form(...),
-    request_json: str = Form(...),
-    header_fields: str = Form(...),
-    sublist_columns: str = Form(...),
-    required_sublist_keys: str = Form("[]"),
-    llm_model: str = Form(""),
-):
-    if not files:
+def create_stored_job(
+    *,
+    file_items: List[tuple[str, bytes]],
+    template_id: str,
+    request_json: str,
+    header_fields: List[Any],
+    sublist_columns: List[Any],
+    required_sublist_keys: List[Any],
+    llm_model: str = "",
+) -> Dict[str, Any]:
+    """落盘 PDF 并创建排队任务。file_items 为 (文件名, 二进制内容)。"""
+    if not file_items:
         raise HTTPException(status_code=400, detail="请至少上传一个 PDF")
-    if len(files) > MAX_BATCH_FILES:
+    if len(file_items) > MAX_BATCH_FILES:
         raise HTTPException(
             status_code=400, detail=f"单次最多上传 {MAX_BATCH_FILES} 个文件"
         )
-
-    header_field_list = _parse_json_field(header_fields, "header_fields")
-    sublist_column_list = _parse_json_field(sublist_columns, "sublist_columns")
-    required_keys = _parse_json_field(required_sublist_keys, "required_sublist_keys")
-    if not isinstance(header_field_list, list) or not isinstance(sublist_column_list, list):
+    if not isinstance(header_fields, list) or not isinstance(sublist_columns, list):
         raise HTTPException(status_code=400, detail="字段定义格式错误")
-    if not isinstance(required_keys, list):
+    if not isinstance(required_sublist_keys, list):
         raise HTTPException(status_code=400, detail="required_sublist_keys 必须是数组")
 
     try:
         body = loads_json_lenient(request_json)
         if not isinstance(body, dict):
             raise ValueError("request_json 必须是对象")
-        # 落盘前写成标准 JSON，后续抽取不再受尾逗号影响
         request_json = json.dumps(body, ensure_ascii=False)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"request_json 无效：{exc}") from exc
@@ -543,12 +539,11 @@ async def create_llm_job(
 
     documents: List[Dict[str, Any]] = []
     used_names: Set[str] = set()
-    for upload in files:
-        original = upload.filename or "document.pdf"
+    for original, content in file_items:
+        original = original or "document.pdf"
         lower = original.lower()
         if not lower.endswith(".pdf"):
             raise HTTPException(status_code=400, detail=f"仅支持 PDF：{original}")
-        content = await upload.read()
         if not content:
             raise HTTPException(status_code=400, detail=f"空文件：{original}")
         if len(content) > MAX_FILE_BYTES:
@@ -592,9 +587,9 @@ async def create_llm_job(
         "status": "queued",
         "templateId": template_id,
         "requestJson": request_json,
-        "headerFields": header_field_list,
-        "sublistColumns": sublist_column_list,
-        "requiredSublistKeys": required_keys,
+        "headerFields": header_fields,
+        "sublistColumns": sublist_columns,
+        "requiredSublistKeys": required_sublist_keys,
         "llmModel": llm_model or str(body.get("model") or ""),
         "documents": documents,
         "current": None,
@@ -603,6 +598,36 @@ async def create_llm_job(
     }
     _write_job(job)
     _wake.set()
+    return job
+
+
+@router.post("")
+async def create_llm_job(
+    files: List[UploadFile] = File(...),
+    template_id: str = Form(...),
+    request_json: str = Form(...),
+    header_fields: str = Form(...),
+    sublist_columns: str = Form(...),
+    required_sublist_keys: str = Form("[]"),
+    llm_model: str = Form(""),
+):
+    header_field_list = _parse_json_field(header_fields, "header_fields")
+    sublist_column_list = _parse_json_field(sublist_columns, "sublist_columns")
+    required_keys = _parse_json_field(required_sublist_keys, "required_sublist_keys")
+
+    file_items: List[tuple[str, bytes]] = []
+    for upload in files:
+        file_items.append((upload.filename or "document.pdf", await upload.read()))
+
+    job = create_stored_job(
+        file_items=file_items,
+        template_id=template_id,
+        request_json=request_json,
+        header_fields=header_field_list,
+        sublist_columns=sublist_column_list,
+        required_sublist_keys=required_keys,
+        llm_model=llm_model,
+    )
     return _public_job(job)
 
 

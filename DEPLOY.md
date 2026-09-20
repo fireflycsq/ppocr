@@ -10,6 +10,8 @@
 Nginx 转发规则：
 
 - `/health` → OCR 健康检查
+- `/api/v1/*` → 文档抽取 API（见 [API.md](./API.md)）
+- `/api/label/*`、`/api/auth/*` → 标注 / 登录 API
 - `/api/*` → OCR API（如 `/api/recognize/image`）
 
 ---

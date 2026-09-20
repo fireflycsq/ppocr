@@ -1,15 +1,17 @@
 import { useState } from 'react'
 import { useAuth } from './contexts/AuthContext'
 import AccuracyStatsPage from './pages/AccuracyStatsPage'
+import ApiDocsPage from './pages/ApiDocsPage'
 import DocumentLabelPage from './pages/DocumentLabelPage'
 import OcrReviewPage from './pages/OcrReviewPage'
 
-type AppPage = 'ocr' | 'label' | 'accuracy'
+type AppPage = 'ocr' | 'label' | 'accuracy' | 'docs'
 
 const NAV_ITEMS: Array<{ key: AppPage; label: string }> = [
   { key: 'ocr', label: '智能预识别审核' },
   { key: 'label', label: '单证标注' },
   { key: 'accuracy', label: '准确率统计' },
+  { key: 'docs', label: '接口文档' },
 ]
 
 export default function App() {
@@ -48,8 +50,10 @@ export default function App() {
           <OcrReviewPage />
         ) : page === 'label' ? (
           <DocumentLabelPage />
-        ) : (
+        ) : page === 'accuracy' ? (
           <AccuracyStatsPage />
+        ) : (
+          <ApiDocsPage />
         )}
       </div>
     </div>
