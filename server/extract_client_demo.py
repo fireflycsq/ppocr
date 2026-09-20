@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""文档抽取 API 调用示例。
+"""文档抽取 API 调用示例（Docker 部署）。
 
 依赖：pip install requests
 
-默认对接本地 label-api：http://localhost:8001
-生产环境经 Nginx 时改为 http://<服务器IP>:8080
+默认对接 Docker Nginx 入口：http://127.0.0.1:8080
+远程调用：EXTRACT_API_BASE=http://<服务器IP>:8080
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from typing import Any, Dict
 
 import requests
 
-BASE_URL = os.environ.get("EXTRACT_API_BASE", "http://localhost:8001")
+BASE_URL = os.environ.get("EXTRACT_API_BASE", "http://127.0.0.1:8080")
 API_KEY = os.environ.get("EXTRACT_API_KEY", "")
 
 
@@ -96,7 +96,7 @@ def main(argv: list[str]) -> int:
 
     if not pdf_path:
         print("用法: python extract_client_demo.py <invoice.pdf> [template_id]")
-        print("示例: python extract_client_demo.py ./fedex.pdf air_waybill")
+        print("示例: EXTRACT_API_BASE=http://127.0.0.1:8080 python extract_client_demo.py ./fedex.pdf air_waybill")
         return 0
 
     if not os.path.isfile(pdf_path):

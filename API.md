@@ -2,23 +2,20 @@
 
 将「上传 PDF → 按版式逐页视觉抽取 → 跨页聚合」封装为 HTTP 接口，供其他系统对接。调用方只需提交 PDF 和版式 ID，服务端使用内置提示词与字段定义，无需前端页面。
 
-交互式 Swagger 文档在网页顶部导航 **接口文档** 中打开，也可直接访问：
+下文调用示例按 **Docker 部署** 编写。抽取 API 经 `ppocr-web`（Nginx）对外暴露，端口为 `.env` 中的 `FRONTEND_PORT`，默认 **8080**。`ppocr-label-api` 不直接映射端口，不要访问 8001。
 
-| 环境 | 地址 |
-|------|------|
-| 本地前端 | `http://localhost:5173/` → 点击「接口文档」 |
-| 本地 label-api | `http://localhost:8001/api/v1/docs` |
-| Docker 生产 | `http://<服务器IP>:8080/` → 点击「接口文档」 |
+```bash
+# 服务器上确认容器已起来
+docker compose ps
+# 或：docker compose -f docker-compose.frontend.yml ps
+```
 
-## 服务地址
+| 调用位置 | Base URL | 交互文档 |
+|----------|----------|----------|
+| 服务器本机 | `http://127.0.0.1:8080` | `http://127.0.0.1:8080/api/v1/docs` |
+| 其他机器 | `http://<服务器IP>:8080` | `http://<服务器IP>:8080/api/v1/docs` |
 
-| 环境 | Base URL | 说明 |
-|------|----------|------|
-| 本地开发 | `http://localhost:8001` | `npm run dev:label` |
-| 经前端代理 | `http://localhost:5173` | Vite 将 `/api/v1` 转到 8001 |
-| Docker 生产 | `http://<服务器IP>:8080` | Nginx 反代到 label-api |
-
-依赖：label-api 进程，以及可达的 Ollama（默认模型 `qwen3-vl:4b`，环境变量 `OLLAMA_BASE` / `EXTRACT_LLM_MODEL`）。
+网页顶部导航 **接口文档** 同样可用。依赖 label-api 与可达的 Ollama（默认模型 `qwen3-vl:4b`）。
 
 ## 鉴权
 
@@ -47,6 +44,29 @@ GET  /api/v1/jobs/{id}/result → 结构化抽取结果
 任务状态：`queued` | `running` | `completed` | `cancelled` | `failed`。
 
 文档状态：`queued` | `running` | `done` | `error` | `cancelled`。
+
+## Docker 调用样例
+
+在部署了 `ppocr-web` 的服务器上执行（远程把 `127.0.0.1` 换成服务器 IP）。若 `.env` 配置了 `EXTRACT_API_KEY`，给每个请求加上 `-H "X-API-Key: $EXTRACT_API_KEY"`。
+
+```bash
+export BASE=http://127.0.0.1:8080
+
+curl "$BASE/api/v1/health"
+curl "$BASE/api/v1/templates"
+
+# 提交任务（返回 202 与 job id）
+curl -sS -X POST "$BASE/api/v1/extract" \
+  -F "template_id=air_waybill" \
+  -F "files=@./invoice.pdf"
+
+# 将上一步 JSON 中的 id 填入
+JOB_ID=job-xxxxxxxx
+
+curl "$BASE/api/v1/jobs/$JOB_ID"
+# 待 status=completed 后取结果
+curl "$BASE/api/v1/jobs/$JOB_ID/result"
+```
 
 ---
 
@@ -140,7 +160,7 @@ GET  /api/v1/jobs/{id}/result → 结构化抽取结果
 ### 请求示例
 
 ```bash
-curl -X POST "http://localhost:8001/api/v1/extract" \
+curl -X POST "http://127.0.0.1:8080/api/v1/extract" \
   -H "X-API-Key: $EXTRACT_API_KEY" \
   -F "template_id=air_waybill" \
   -F "files=@/path/to/fedex-invoice.pdf"
@@ -149,7 +169,7 @@ curl -X POST "http://localhost:8001/api/v1/extract" \
 同步等待：
 
 ```bash
-curl -X POST "http://localhost:8001/api/v1/extract?wait=true" \
+curl -X POST "http://127.0.0.1:8080/api/v1/extract?wait=true" \
   -F "template_id=air_waybill" \
   -F "files=@/path/to/fedex-invoice.pdf"
 ```
@@ -157,7 +177,7 @@ curl -X POST "http://localhost:8001/api/v1/extract?wait=true" \
 批量：
 
 ```bash
-curl -X POST "http://localhost:8001/api/v1/extract" \
+curl -X POST "http://127.0.0.1:8080/api/v1/extract" \
   -F "template_id=air_waybill_dhl" \
   -F "files=@dhl-1.pdf" \
   -F "files=@dhl-2.pdf"
@@ -204,8 +224,8 @@ curl -X POST "http://localhost:8001/api/v1/extract" \
 查询进度。`include_results=true` 时，已完成的文档会附带抽取字段。
 
 ```bash
-curl "http://localhost:8001/api/v1/jobs/job-a1b2c3d4e5f6"
-curl "http://localhost:8001/api/v1/jobs/job-a1b2c3d4e5f6?include_results=true"
+curl "http://127.0.0.1:8080/api/v1/jobs/job-a1b2c3d4e5f6"
+curl "http://127.0.0.1:8080/api/v1/jobs/job-a1b2c3d4e5f6?include_results=true"
 ```
 
 `current` 表示正在处理的页：
@@ -287,7 +307,7 @@ FedEx / DHL 空运单典型结构（`structure_type = invoice_with_sublist`）�
 事件名：`snapshot`、`job_status`、`doc_started`、`stream`、`page_done`、`doc_done`、`doc_error`。
 
 ```javascript
-const source = new EventSource("http://localhost:8001/api/v1/jobs/job-xxx/events");
+const source = new EventSource("http://127.0.0.1:8080/api/v1/jobs/job-xxx/events");
 source.addEventListener("job_status", (ev) => {
   const data = JSON.parse(ev.data);
   if (["completed", "failed", "cancelled"].includes(data.status)) source.close();
@@ -301,7 +321,7 @@ source.addEventListener("job_status", (ev) => {
 取消排队或正在运行的任务。
 
 ```bash
-curl -X POST "http://localhost:8001/api/v1/jobs/job-a1b2c3d4e5f6/cancel"
+curl -X POST "http://127.0.0.1:8080/api/v1/jobs/job-a1b2c3d4e5f6/cancel"
 ```
 
 ## GET `/api/v1/jobs/{job_id}/export.zip`
@@ -309,7 +329,7 @@ curl -X POST "http://localhost:8001/api/v1/jobs/job-a1b2c3d4e5f6/cancel"
 打包已完成文档的 JSON（与页面「导出」同结构）。没有可导出结果时返回 `400`。
 
 ```bash
-curl -L "http://localhost:8001/api/v1/jobs/job-a1b2c3d4e5f6/export.zip" -o results.zip
+curl -L "http://127.0.0.1:8080/api/v1/jobs/job-a1b2c3d4e5f6/export.zip" -o results.zip
 ```
 
 ---
@@ -320,7 +340,7 @@ curl -L "http://localhost:8001/api/v1/jobs/job-a1b2c3d4e5f6/export.zip" -o resul
 import time
 import requests
 
-BASE = "http://localhost:8001"
+BASE = "http://127.0.0.1:8080"
 headers = {}  # 若配置了 EXTRACT_API_KEY：{"X-API-Key": "..."}
 
 with open("fedex-invoice.pdf", "rb") as f:
@@ -348,8 +368,9 @@ print(result["documents"][0]["sublist"])
 仓库内完整脚本：[`server/extract_client_demo.py`](./server/extract_client_demo.py)
 
 ```bash
-cd server
-python3 extract_client_demo.py /path/to/invoice.pdf air_waybill
+# 在能访问 Docker 入口的机器上
+EXTRACT_API_BASE=http://127.0.0.1:8080 \
+  python3 server/extract_client_demo.py /path/to/invoice.pdf air_waybill
 ```
 
 ## 环境变量

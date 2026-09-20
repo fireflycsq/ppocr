@@ -46,6 +46,22 @@ curl http://localhost:8080/health
 curl -X POST http://localhost:8080/api/recognize/image -F "file=@test.jpg"
 ```
 
+验证文档抽取 API：
+
+```bash
+curl http://localhost:8080/api/v1/health
+
+curl -X POST http://localhost:8080/api/v1/extract \
+  -F "template_id=air_waybill" \
+  -F "files=@invoice.pdf"
+
+# 将返回的 id 填入
+curl http://localhost:8080/api/v1/jobs/<job_id>
+curl http://localhost:8080/api/v1/jobs/<job_id>/result
+```
+
+交互文档：`http://<服务器IP>:8080/api/v1/docs`。完整字段与错误码见 **[API.md](./API.md)**。
+
 ---
 
 ## OCR 已在运行 — 只部署前端

@@ -9,19 +9,21 @@
 上传 PDF + 版式 ID，异步返回发票头与明细 JSON。完整说明、字段表和错误码见 **[API.md](./API.md)**。
 
 ```bash
-# 启动 label-api（默认 8001）
-npm run dev:label
+# Docker 部署后，Nginx 对外默认 8080（.env 的 FRONTEND_PORT）
+# 远程调用把 127.0.0.1 换成服务器 IP
+
+curl http://127.0.0.1:8080/api/v1/health
 
 # 提交 FedEx 空运单
-curl -X POST "http://localhost:8001/api/v1/extract" \
+curl -X POST "http://127.0.0.1:8080/api/v1/extract" \
   -F "template_id=air_waybill" \
   -F "files=@invoice.pdf"
 
 # 按返回的 job id 查询结果
-curl "http://localhost:8001/api/v1/jobs/<job_id>/result"
+curl "http://127.0.0.1:8080/api/v1/jobs/<job_id>/result"
 ```
 
-Python 示例：`server/extract_client_demo.py`。网页交互文档：顶部导航 **接口文档**，或打开 `/api/v1/docs`。
+Python 示例：`server/extract_client_demo.py`。网页交互文档：`http://<服务器IP>:8080/api/v1/docs`，或打开页面顶部 **接口文档**。
 
 ## 本地开发
 
